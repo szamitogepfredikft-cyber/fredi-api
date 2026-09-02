@@ -8,6 +8,7 @@ import (
 	"github.com/hajdurenato/fredi-api/internal/equipmentlocations"
 	"github.com/hajdurenato/fredi-api/internal/extinguisherassignments"
 	"github.com/hajdurenato/fredi-api/internal/extinguishers"
+	"github.com/hajdurenato/fredi-api/internal/fireinspectionjobs"
 	"github.com/hajdurenato/fredi-api/internal/sites"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -31,6 +32,11 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 	extinguisherAssignmentRepository := extinguisherassignments.NewRepository(db)
 	extinguisherAssignmentHandler := NewExtinguisherAssignmentHandler(
 		extinguisherAssignmentRepository,
+	)
+
+	fireInspectionJobRepository := fireinspectionjobs.NewRepository(db)
+	fireInspectionJobHandler := NewFireInspectionJobHandler(
+		fireInspectionJobRepository,
 	)
 
 	router.Route("/api/v1", func(router chi.Router) {
@@ -65,6 +71,11 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 				extinguisherAssignmentHandler.ListByExtinguisher,
 			)
 			router.Get("/{extinguisherID}", extinguisherHandler.GetByID)
+		})
+
+		router.Route("/fire-inspection-jobs", func(router chi.Router) {
+			router.Post("/", fireInspectionJobHandler.Create)
+			router.Get("/{jobID}", fireInspectionJobHandler.GetByID)
 		})
 
 		router.Get("/sites/{siteID}", siteHandler.GetByID)
