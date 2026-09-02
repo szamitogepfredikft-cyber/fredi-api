@@ -6,6 +6,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/hajdurenato/fredi-api/internal/customers"
 	"github.com/hajdurenato/fredi-api/internal/equipmentlocations"
+	"github.com/hajdurenato/fredi-api/internal/extinguisherassignments"
 	"github.com/hajdurenato/fredi-api/internal/extinguishers"
 	"github.com/hajdurenato/fredi-api/internal/sites"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,6 +28,10 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 
 	extinguisherRepository := extinguishers.NewRepository(db)
 	extinguisherHandler := NewExtinguisherHandler(extinguisherRepository)
+	extinguisherAssignmentRepository := extinguisherassignments.NewRepository(db)
+	extinguisherAssignmentHandler := NewExtinguisherAssignmentHandler(
+		extinguisherAssignmentRepository,
+	)
 
 	router.Route("/api/v1", func(router chi.Router) {
 		router.Route("/customers", func(router chi.Router) {
@@ -47,6 +52,14 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 		router.Route("/extinguishers", func(router chi.Router) {
 			router.Post("/", extinguisherHandler.Create)
 			router.Get("/", extinguisherHandler.List)
+			router.Post(
+				"/{extinguisherID}/assignments",
+				extinguisherAssignmentHandler.Create,
+			)
+			router.Get(
+				"/{extinguisherID}/assignments",
+				extinguisherAssignmentHandler.ListByExtinguisher,
+			)
 			router.Get("/{extinguisherID}", extinguisherHandler.GetByID)
 		})
 
