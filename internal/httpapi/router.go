@@ -6,6 +6,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/hajdurenato/fredi-api/internal/customers"
 	"github.com/hajdurenato/fredi-api/internal/equipmentlocations"
+	"github.com/hajdurenato/fredi-api/internal/extinguishers"
 	"github.com/hajdurenato/fredi-api/internal/sites"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -24,6 +25,9 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 	equipmentLocationRepository := equipmentlocations.NewRepository(db)
 	equipmentLocationHandler := NewEquipmentLocationHandler(equipmentLocationRepository)
 
+	extinguisherRepository := extinguishers.NewRepository(db)
+	extinguisherHandler := NewExtinguisherHandler(extinguisherRepository)
+
 	router.Route("/api/v1", func(router chi.Router) {
 		router.Route("/customers", func(router chi.Router) {
 			router.Post("/", customerHandler.Create)
@@ -38,6 +42,12 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 		router.Route("/sites/{siteID}/equipment-locations", func(router chi.Router) {
 			router.Post("/", equipmentLocationHandler.Create)
 			router.Get("/", equipmentLocationHandler.ListBySite)
+		})
+
+		router.Route("/extinguishers", func(router chi.Router) {
+			router.Post("/", extinguisherHandler.Create)
+			router.Get("/", extinguisherHandler.List)
+			router.Get("/{extinguisherID}", extinguisherHandler.GetByID)
 		})
 
 		router.Get("/sites/{siteID}", siteHandler.GetByID)
