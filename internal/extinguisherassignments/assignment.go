@@ -377,6 +377,72 @@ func (r *Repository) Unassign(
 	return assignment, nil
 }
 
+func (r *Repository) GetActiveByEquipmentLocation(
+	ctx context.Context,
+	equipmentLocationID uuid.UUID,
+) (*Assignment, error) {
+	const locationExistsQuery = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM fire_equipment_locations
+			WHERE id = $1
+			  AND archived_at IS NULL
+		)
+	`
+
+	var locationExists bool
+
+	if err := r.db.QueryRow(
+		ctx,
+		locationExistsQuery,
+		equipmentLocationID,
+	).Scan(&locationExists); err != nil {
+		return nil, err
+	}
+
+	if !locationExists {
+		return nil, ErrEquipmentLocationNotFound
+	}
+
+	const activeAssignmentQuery = `
+		SELECT
+			id,
+			equipment_location_id,
+			fire_extinguisher_id,
+			assigned_at,
+			unassigned_at,
+			assignment_reason,
+			unassignment_reason,
+			notes,
+			created_by_user_id,
+			created_at
+		FROM extinguisher_location_assignments
+		WHERE equipment_location_id = $1
+		  AND unassigned_at IS NULL
+		ORDER BY assigned_at DESC, id DESC
+		LIMIT 1
+	`
+
+	var assignment Assignment
+
+	err := scanAssignment(
+		r.db.QueryRow(
+			ctx,
+			activeAssignmentQuery,
+			equipmentLocationID,
+		),
+		&assignment,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &assignment, nil
+}
+
 func (r *Repository) ListByExtinguisher(
 	ctx context.Context,
 	extinguisherID uuid.UUID,

@@ -69,6 +69,10 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 
 		router.Get("/sites/{siteID}", siteHandler.GetByID)
 		router.Get("/equipment-locations/{locationID}", equipmentLocationHandler.GetByID)
+		router.Get(
+			"/equipment-locations/{locationID}/assignment",
+			extinguisherAssignmentHandler.GetActiveByEquipmentLocation,
+		)
 	})
 
 	return router

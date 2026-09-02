@@ -184,3 +184,33 @@ func (h *extinguisherAssignmentHandler) Unassign(
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(assignment)
 }
+func (h *extinguisherAssignmentHandler) GetActiveByEquipmentLocation(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	locationID, ok := pathUUID(w, r, "locationID")
+	if !ok {
+		return
+	}
+
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	assignment, err := h.repository.GetActiveByEquipmentLocation(ctx, locationID)
+	if err != nil {
+		if errors.Is(err, extinguisherassignments.ErrEquipmentLocationNotFound) {
+			writeJSONError(w, http.StatusNotFound, "equipment location not found")
+			return
+		}
+
+		writeJSONError(w, http.StatusInternalServerError, "failed to get active equipment location assignment")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(struct {
+		Assignment *extinguisherassignments.Assignment `json:"assignment"`
+	}{
+		Assignment: assignment,
+	})
+}
