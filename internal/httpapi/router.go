@@ -56,6 +56,10 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 				"/{extinguisherID}/assignments",
 				extinguisherAssignmentHandler.Create,
 			)
+			router.Post(
+				"/{extinguisherID}/unassignments",
+				extinguisherAssignmentHandler.Unassign,
+			)
 			router.Get(
 				"/{extinguisherID}/assignments",
 				extinguisherAssignmentHandler.ListByExtinguisher,

@@ -21,12 +21,22 @@ const (
 	AssignmentReasonOther             = "OTHER"
 )
 
+const (
+	UnassignmentReasonReplaced = "REPLACED"
+	UnassignmentReasonReturned = "RETURNED"
+	UnassignmentReasonMissing  = "MISSING"
+	UnassignmentReasonRemoved  = "REMOVED"
+	UnassignmentReasonDisposed = "DISPOSED"
+	UnassignmentReasonOther    = "OTHER"
+)
+
 var (
 	ErrExtinguisherNotFound         = errors.New("extinguisher not found")
 	ErrEquipmentLocationNotFound    = errors.New("equipment location not found")
 	ErrExtinguisherNotIssuable      = errors.New("extinguisher is not issuable")
 	ErrExtinguisherAlreadyAssigned  = errors.New("extinguisher already has an active assignment")
 	ErrEquipmentLocationAlreadyUsed = errors.New("equipment location already has an active assignment")
+	ErrActiveAssignmentNotFound     = errors.New("active extinguisher assignment not found")
 )
 
 var validAssignmentReasons = map[string]struct{}{
@@ -35,6 +45,15 @@ var validAssignmentReasons = map[string]struct{}{
 	AssignmentReasonReinstallation:    {},
 	AssignmentReasonMigratedHistory:   {},
 	AssignmentReasonOther:             {},
+}
+
+var validUnassignmentReasons = map[string]struct{}{
+	UnassignmentReasonReplaced: {},
+	UnassignmentReasonReturned: {},
+	UnassignmentReasonMissing:  {},
+	UnassignmentReasonRemoved:  {},
+	UnassignmentReasonDisposed: {},
+	UnassignmentReasonOther:    {},
 }
 
 type Assignment struct {
@@ -56,6 +75,11 @@ type CreateInput struct {
 	Notes               *string   `json:"notes"`
 }
 
+type UnassignInput struct {
+	UnassignmentReason string  `json:"unassignment_reason"`
+	Notes              *string `json:"notes"`
+}
+
 type Repository struct {
 	db *pgxpool.Pool
 }
@@ -72,6 +96,11 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 
 func IsValidAssignmentReason(value string) bool {
 	_, ok := validAssignmentReasons[strings.TrimSpace(value)]
+	return ok
+}
+
+func IsValidUnassignmentReason(value string) bool {
+	_, ok := validUnassignmentReasons[strings.TrimSpace(value)]
 	return ok
 }
 
@@ -221,6 +250,120 @@ func (r *Repository) Create(
 		WHERE id = $2
 		`,
 		extinguishers.LifecycleActiveAtCustomer,
+		extinguisherID,
+	)
+	if err != nil {
+		return Assignment{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Assignment{}, mapAssignmentDatabaseError(err)
+	}
+
+	return assignment, nil
+}
+
+func (r *Repository) Unassign(
+	ctx context.Context,
+	extinguisherID uuid.UUID,
+	input UnassignInput,
+) (Assignment, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return Assignment{}, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	var lifecycleStatus string
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT lifecycle_status
+		FROM fire_extinguishers
+		WHERE id = $1
+		  AND archived_at IS NULL
+		FOR UPDATE
+		`,
+		extinguisherID,
+	).Scan(&lifecycleStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Assignment{}, ErrExtinguisherNotFound
+	}
+	if err != nil {
+		return Assignment{}, err
+	}
+
+	if lifecycleStatus != extinguishers.LifecycleActiveAtCustomer {
+		return Assignment{}, ErrActiveAssignmentNotFound
+	}
+
+	var activeAssignmentID uuid.UUID
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT id
+		FROM extinguisher_location_assignments
+		WHERE fire_extinguisher_id = $1
+		  AND unassigned_at IS NULL
+		FOR UPDATE
+		`,
+		extinguisherID,
+	).Scan(&activeAssignmentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Assignment{}, ErrActiveAssignmentNotFound
+	}
+	if err != nil {
+		return Assignment{}, err
+	}
+
+	var assignment Assignment
+
+	err = scanAssignment(
+		tx.QueryRow(
+			ctx,
+			`
+			UPDATE extinguisher_location_assignments
+			SET
+				unassigned_at = now(),
+				unassignment_reason = $1,
+				notes = $2
+			WHERE id = $3
+			RETURNING
+				id,
+				equipment_location_id,
+				fire_extinguisher_id,
+				assigned_at,
+				unassigned_at,
+				assignment_reason,
+				unassignment_reason,
+				notes,
+				created_by_user_id,
+				created_at
+			`,
+			input.UnassignmentReason,
+			input.Notes,
+			activeAssignmentID,
+		),
+		&assignment,
+	)
+	if err != nil {
+		return Assignment{}, mapAssignmentDatabaseError(err)
+	}
+
+	_, err = tx.Exec(
+		ctx,
+		`
+		UPDATE fire_extinguishers
+		SET
+			lifecycle_status = $1,
+			updated_at = now()
+		WHERE id = $2
+		`,
+		extinguishers.LifecycleReturned,
 		extinguisherID,
 	)
 	if err != nil {

@@ -124,3 +124,63 @@ func (h *extinguisherAssignmentHandler) ListByExtinguisher(
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(assignments)
 }
+
+type unassignExtinguisherRequest struct {
+	UnassignmentReason string  `json:"unassignment_reason"`
+	Notes              *string `json:"notes"`
+}
+
+func (h *extinguisherAssignmentHandler) Unassign(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	extinguisherID, ok := pathUUID(w, r, "extinguisherID")
+	if !ok {
+		return
+	}
+
+	var request unassignExtinguisherRequest
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON request body")
+		return
+	}
+
+	unassignmentReason := strings.TrimSpace(request.UnassignmentReason)
+	if unassignmentReason == "" {
+		writeError(w, http.StatusBadRequest, "unassignment_reason is required")
+		return
+	}
+
+	if !extinguisherassignments.IsValidUnassignmentReason(unassignmentReason) {
+		writeError(w, http.StatusBadRequest, "invalid unassignment_reason")
+		return
+	}
+
+	input := extinguisherassignments.UnassignInput{
+		UnassignmentReason: unassignmentReason,
+		Notes:              request.Notes,
+	}
+
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	assignment, err := h.repository.Unassign(ctx, extinguisherID, input)
+	if err != nil {
+		switch {
+		case errors.Is(err, extinguisherassignments.ErrExtinguisherNotFound):
+			writeError(w, http.StatusNotFound, "extinguisher not found")
+		case errors.Is(err, extinguisherassignments.ErrActiveAssignmentNotFound):
+			writeError(w, http.StatusConflict, "extinguisher has no active assignment")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to unassign extinguisher")
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(assignment)
+}
