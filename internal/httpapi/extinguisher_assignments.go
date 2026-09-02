@@ -44,24 +44,24 @@ func (h *extinguisherAssignmentHandler) Create(
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON request body")
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON request body")
 		return
 	}
 
 	equipmentLocationID, err := uuid.Parse(strings.TrimSpace(request.EquipmentLocationID))
 	if err != nil || equipmentLocationID == uuid.Nil {
-		writeError(w, http.StatusBadRequest, "invalid equipment_location_id")
+		writeJSONError(w, http.StatusBadRequest, "invalid equipment_location_id")
 		return
 	}
 
 	assignmentReason := strings.TrimSpace(request.AssignmentReason)
 	if assignmentReason == "" {
-		writeError(w, http.StatusBadRequest, "assignment_reason is required")
+		writeJSONError(w, http.StatusBadRequest, "assignment_reason is required")
 		return
 	}
 
 	if !extinguisherassignments.IsValidAssignmentReason(assignmentReason) {
-		writeError(w, http.StatusBadRequest, "invalid assignment_reason")
+		writeJSONError(w, http.StatusBadRequest, "invalid assignment_reason")
 		return
 	}
 
@@ -78,17 +78,17 @@ func (h *extinguisherAssignmentHandler) Create(
 	if err != nil {
 		switch {
 		case errors.Is(err, extinguisherassignments.ErrExtinguisherNotFound):
-			writeError(w, http.StatusNotFound, "extinguisher not found")
+			writeJSONError(w, http.StatusNotFound, "extinguisher not found")
 		case errors.Is(err, extinguisherassignments.ErrEquipmentLocationNotFound):
-			writeError(w, http.StatusNotFound, "equipment location not found")
+			writeJSONError(w, http.StatusNotFound, "equipment location not found")
 		case errors.Is(err, extinguisherassignments.ErrExtinguisherNotIssuable):
-			writeError(w, http.StatusConflict, "extinguisher is not issuable")
+			writeJSONError(w, http.StatusConflict, "extinguisher is not issuable")
 		case errors.Is(err, extinguisherassignments.ErrExtinguisherAlreadyAssigned):
-			writeError(w, http.StatusConflict, "extinguisher already has an active assignment")
+			writeJSONError(w, http.StatusConflict, "extinguisher already has an active assignment")
 		case errors.Is(err, extinguisherassignments.ErrEquipmentLocationAlreadyUsed):
-			writeError(w, http.StatusConflict, "equipment location already has an active assignment")
+			writeJSONError(w, http.StatusConflict, "equipment location already has an active assignment")
 		default:
-			writeError(w, http.StatusInternalServerError, "failed to create extinguisher assignment")
+			writeJSONError(w, http.StatusInternalServerError, "failed to create extinguisher assignment")
 		}
 		return
 	}
@@ -113,11 +113,11 @@ func (h *extinguisherAssignmentHandler) ListByExtinguisher(
 	assignments, err := h.repository.ListByExtinguisher(ctx, extinguisherID)
 	if err != nil {
 		if errors.Is(err, extinguisherassignments.ErrExtinguisherNotFound) {
-			writeError(w, http.StatusNotFound, "extinguisher not found")
+			writeJSONError(w, http.StatusNotFound, "extinguisher not found")
 			return
 		}
 
-		writeError(w, http.StatusInternalServerError, "failed to list extinguisher assignments")
+		writeJSONError(w, http.StatusInternalServerError, "failed to list extinguisher assignments")
 		return
 	}
 
@@ -145,18 +145,18 @@ func (h *extinguisherAssignmentHandler) Unassign(
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON request body")
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON request body")
 		return
 	}
 
 	unassignmentReason := strings.TrimSpace(request.UnassignmentReason)
 	if unassignmentReason == "" {
-		writeError(w, http.StatusBadRequest, "unassignment_reason is required")
+		writeJSONError(w, http.StatusBadRequest, "unassignment_reason is required")
 		return
 	}
 
 	if !extinguisherassignments.IsValidUnassignmentReason(unassignmentReason) {
-		writeError(w, http.StatusBadRequest, "invalid unassignment_reason")
+		writeJSONError(w, http.StatusBadRequest, "invalid unassignment_reason")
 		return
 	}
 
@@ -172,11 +172,11 @@ func (h *extinguisherAssignmentHandler) Unassign(
 	if err != nil {
 		switch {
 		case errors.Is(err, extinguisherassignments.ErrExtinguisherNotFound):
-			writeError(w, http.StatusNotFound, "extinguisher not found")
+			writeJSONError(w, http.StatusNotFound, "extinguisher not found")
 		case errors.Is(err, extinguisherassignments.ErrActiveAssignmentNotFound):
-			writeError(w, http.StatusConflict, "extinguisher has no active assignment")
+			writeJSONError(w, http.StatusConflict, "extinguisher has no active assignment")
 		default:
-			writeError(w, http.StatusInternalServerError, "failed to unassign extinguisher")
+			writeJSONError(w, http.StatusInternalServerError, "failed to unassign extinguisher")
 		}
 		return
 	}
