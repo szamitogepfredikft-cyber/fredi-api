@@ -90,6 +90,10 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 				"/{jobID}/rows",
 				fireInspectionRowHandler.List,
 			)
+			router.Patch(
+				"/{jobID}/rows/{rowID}",
+				fireInspectionRowHandler.Update,
+			)
 		})
 
 		router.Get("/sites/{siteID}", siteHandler.GetByID)
