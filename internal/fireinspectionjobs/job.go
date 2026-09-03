@@ -14,8 +14,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var ErrCustomerOrSiteNotFound = errors.New("customer or site not found")
-var ErrJobNotFound = errors.New("fire inspection job not found")
+var (
+	ErrCustomerOrSiteNotFound = errors.New("customer or site not found")
+	ErrJobNotFound            = errors.New("fire inspection job not found")
+	ErrJobNotEditable         = errors.New("fire inspection job is not editable")
+)
 
 type Date struct {
 	time.Time
@@ -109,6 +112,195 @@ type CreateInput struct {
 	InspectorName        *string `json:"inspector_name"`
 	InspectorCertificate *string `json:"inspector_certificate"`
 	RepairerName         *string `json:"repairer_name"`
+}
+type optionalString struct {
+	Set   bool
+	Value *string
+}
+
+type optionalDate struct {
+	Set   bool
+	Value *Date
+}
+
+type optionalTime struct {
+	Set   bool
+	Value *time.Time
+}
+
+type UpdateInput struct {
+	ScheduledFor         optionalDate
+	PerformedAt          optionalTime
+	IssuedByName         optionalString
+	IssuedByCompany      optionalString
+	IssuedByPhone        optionalString
+	IssuedByEmail        optionalString
+	InspectorName        optionalString
+	InspectorCertificate optionalString
+	RepairerName         optionalString
+	Notes                optionalString
+}
+
+func (i *UpdateInput) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	allowedFields := map[string]struct{}{
+		"scheduled_for":         {},
+		"performed_at":          {},
+		"issued_by_name":        {},
+		"issued_by_company":     {},
+		"issued_by_phone":       {},
+		"issued_by_email":       {},
+		"inspector_name":        {},
+		"inspector_certificate": {},
+		"repairer_name":         {},
+		"notes":                 {},
+	}
+
+	for field := range raw {
+		if _, ok := allowedFields[field]; !ok {
+			return errors.New("unknown JSON field")
+		}
+	}
+
+	if err := decodeOptionalDate(raw, "scheduled_for", &i.ScheduledFor); err != nil {
+		return err
+	}
+
+	if err := decodeOptionalTime(raw, "performed_at", &i.PerformedAt); err != nil {
+		return err
+	}
+
+	if err := decodeOptionalString(raw, "issued_by_name", &i.IssuedByName); err != nil {
+		return err
+	}
+
+	if err := decodeOptionalString(raw, "issued_by_company", &i.IssuedByCompany); err != nil {
+		return err
+	}
+
+	if err := decodeOptionalString(raw, "issued_by_phone", &i.IssuedByPhone); err != nil {
+		return err
+	}
+
+	if err := decodeOptionalString(raw, "issued_by_email", &i.IssuedByEmail); err != nil {
+		return err
+	}
+
+	if err := decodeOptionalString(raw, "inspector_name", &i.InspectorName); err != nil {
+		return err
+	}
+
+	if err := decodeOptionalString(
+		raw,
+		"inspector_certificate",
+		&i.InspectorCertificate,
+	); err != nil {
+		return err
+	}
+
+	if err := decodeOptionalString(raw, "repairer_name", &i.RepairerName); err != nil {
+		return err
+	}
+
+	if err := decodeOptionalString(raw, "notes", &i.Notes); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func decodeOptionalString(
+	raw map[string]json.RawMessage,
+	field string,
+	target *optionalString,
+) error {
+	value, ok := raw[field]
+	if !ok {
+		return nil
+	}
+
+	target.Set = true
+
+	if string(value) == "null" {
+		target.Value = nil
+		return nil
+	}
+
+	var decoded string
+
+	if err := json.Unmarshal(value, &decoded); err != nil {
+		return errors.New(field + " must be a string or null")
+	}
+
+	target.Value = &decoded
+
+	return nil
+}
+
+func decodeOptionalDate(
+	raw map[string]json.RawMessage,
+	field string,
+	target *optionalDate,
+) error {
+	value, ok := raw[field]
+	if !ok {
+		return nil
+	}
+
+	target.Set = true
+
+	if string(value) == "null" {
+		target.Value = nil
+		return nil
+	}
+
+	var decoded Date
+
+	if err := json.Unmarshal(value, &decoded); err != nil {
+		return err
+	}
+
+	target.Value = &decoded
+
+	return nil
+}
+
+func decodeOptionalTime(
+	raw map[string]json.RawMessage,
+	field string,
+	target *optionalTime,
+) error {
+	value, ok := raw[field]
+	if !ok {
+		return nil
+	}
+
+	target.Set = true
+
+	if string(value) == "null" {
+		target.Value = nil
+		return nil
+	}
+
+	var valueString string
+
+	if err := json.Unmarshal(value, &valueString); err != nil {
+		return errors.New(field + " must be an RFC3339 timestamp or null")
+	}
+
+	parsed, err := time.Parse(time.RFC3339, valueString)
+	if err != nil {
+		return errors.New(field + " must be an RFC3339 timestamp or null")
+	}
+
+	target.Value = &parsed
+
+	return nil
 }
 
 type Repository struct {
@@ -217,6 +409,131 @@ func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error)
 	}
 
 	return job, nil
+}
+
+func (r *Repository) Update(
+	ctx context.Context,
+	jobID uuid.UUID,
+	input UpdateInput,
+) (Job, error) {
+	var status string
+
+	err := r.db.QueryRow(
+		ctx,
+		`
+		SELECT status
+		FROM fire_inspection_jobs
+		WHERE id = $1
+		  AND archived_at IS NULL
+		`,
+		jobID,
+	).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Job{}, ErrJobNotFound
+	}
+	if err != nil {
+		return Job{}, err
+	}
+
+	if status == "COMPLETED" || status == "CANCELLED" {
+		return Job{}, ErrJobNotEditable
+	}
+
+	var inspectionQuarter *string
+	var inspectionYear *int
+
+	if input.ScheduledFor.Set {
+		inspectionQuarter, inspectionYear = quarterFromDate(input.ScheduledFor.Value)
+	}
+
+	const query = `
+		UPDATE fire_inspection_jobs
+		SET
+			scheduled_for = CASE
+				WHEN $2 THEN $3
+				ELSE scheduled_for
+			END,
+			inspection_year = CASE
+				WHEN $2 THEN $4
+				ELSE inspection_year
+			END,
+			inspection_quarter = CASE
+				WHEN $2 THEN $5
+				ELSE inspection_quarter
+			END,
+			performed_at = CASE
+				WHEN $6 THEN $7
+				ELSE performed_at
+			END,
+			issued_by_name_snapshot = CASE
+				WHEN $8 THEN $9
+				ELSE issued_by_name_snapshot
+			END,
+			issued_by_company_snapshot = CASE
+				WHEN $10 THEN $11
+				ELSE issued_by_company_snapshot
+			END,
+			issued_by_phone_snapshot = CASE
+				WHEN $12 THEN $13
+				ELSE issued_by_phone_snapshot
+			END,
+			issued_by_email_snapshot = CASE
+				WHEN $14 THEN $15
+				ELSE issued_by_email_snapshot
+			END,
+			inspector_name_snapshot = CASE
+				WHEN $16 THEN $17
+				ELSE inspector_name_snapshot
+			END,
+			inspector_certificate_snapshot = CASE
+				WHEN $18 THEN $19
+				ELSE inspector_certificate_snapshot
+			END,
+			repairer_name_snapshot = CASE
+				WHEN $20 THEN $21
+				ELSE repairer_name_snapshot
+			END,
+			notes = CASE
+				WHEN $22 THEN $23
+				ELSE notes
+			END,
+			updated_at = now()
+		WHERE id = $1
+		  AND archived_at IS NULL
+	`
+
+	_, err = r.db.Exec(
+		ctx,
+		query,
+		jobID,
+		input.ScheduledFor.Set,
+		input.ScheduledFor.Value,
+		inspectionYear,
+		inspectionQuarter,
+		input.PerformedAt.Set,
+		input.PerformedAt.Value,
+		input.IssuedByName.Set,
+		optionalTrimmedString(input.IssuedByName.Value),
+		input.IssuedByCompany.Set,
+		optionalTrimmedString(input.IssuedByCompany.Value),
+		input.IssuedByPhone.Set,
+		optionalTrimmedString(input.IssuedByPhone.Value),
+		input.IssuedByEmail.Set,
+		optionalTrimmedString(input.IssuedByEmail.Value),
+		input.InspectorName.Set,
+		optionalTrimmedString(input.InspectorName.Value),
+		input.InspectorCertificate.Set,
+		optionalTrimmedString(input.InspectorCertificate.Value),
+		input.RepairerName.Set,
+		optionalTrimmedString(input.RepairerName.Value),
+		input.Notes.Set,
+		optionalTrimmedString(input.Notes.Value),
+	)
+	if err != nil {
+		return Job{}, err
+	}
+
+	return r.GetByID(ctx, jobID)
 }
 
 func (r *Repository) GetByID(ctx context.Context, jobID uuid.UUID) (Job, error) {
