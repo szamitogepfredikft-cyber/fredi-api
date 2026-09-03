@@ -145,6 +145,44 @@ func (r *Repository) List(ctx context.Context) ([]Customer, error) {
 	return customers, nil
 }
 
+func (r *Repository) GetByID(
+	ctx context.Context,
+	customerID uuid.UUID,
+) (Customer, error) {
+	const query = `
+		SELECT
+			id,
+			name,
+			normalized_name,
+			tax_number,
+			billing_address_display,
+			notes,
+			created_at,
+			updated_at
+		FROM customers
+		WHERE id = $1
+			AND archived_at IS NULL
+	`
+
+	var customer Customer
+
+	err := r.db.QueryRow(ctx, query, customerID).Scan(
+		&customer.ID,
+		&customer.Name,
+		&customer.NormalizedName,
+		&customer.TaxNumber,
+		&customer.BillingAddressDisplay,
+		&customer.Notes,
+		&customer.CreatedAt,
+		&customer.UpdatedAt,
+	)
+	if err != nil {
+		return Customer{}, err
+	}
+
+	return customer, nil
+}
+
 func normalizeName(value string) string {
 	value = strings.TrimSpace(strings.ToUpper(value))
 

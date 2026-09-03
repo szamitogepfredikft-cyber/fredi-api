@@ -7,7 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/hajdurenato/fredi-api/internal/customers"
+	"github.com/jackc/pgx/v5"
 )
 
 type customerHandler struct {
@@ -66,6 +69,30 @@ func (h *customerHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(customerList)
+}
+
+func (h *customerHandler) GetByID(w http.ResponseWriter, r *http.Request) {
+	customerID, err := uuid.Parse(chi.URLParam(r, "customerID"))
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid customer ID")
+		return
+	}
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	customer, err := h.repository.GetByID(ctx, customerID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSONError(w, http.StatusNotFound, "customer not found")
+			return
+		}
+
+		writeJSONError(w, http.StatusInternalServerError, "failed to get customer")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(customer)
 }
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {

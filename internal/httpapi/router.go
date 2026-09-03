@@ -4,10 +4,12 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/hajdurenato/fredi-api/internal/customercontacts"
 	"github.com/hajdurenato/fredi-api/internal/customers"
 	"github.com/hajdurenato/fredi-api/internal/equipmentlocations"
 	"github.com/hajdurenato/fredi-api/internal/extinguisherassignments"
 	"github.com/hajdurenato/fredi-api/internal/extinguishers"
+	"github.com/hajdurenato/fredi-api/internal/fireinspectionduedates"
 	"github.com/hajdurenato/fredi-api/internal/fireinspectionjobs"
 	"github.com/hajdurenato/fredi-api/internal/fireinspectionrows"
 	"github.com/hajdurenato/fredi-api/internal/sites"
@@ -21,6 +23,10 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 
 	customerRepository := customers.NewRepository(db)
 	customerHandler := NewCustomerHandler(customerRepository)
+	customerContactRepository := customercontacts.NewRepository(db)
+	customerContactHandler := NewCustomerContactHandler(
+		customerContactRepository,
+	)
 
 	siteRepository := sites.NewRepository(db)
 	siteHandler := NewSiteHandler(siteRepository)
@@ -39,6 +45,10 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 	fireInspectionJobHandler := NewFireInspectionJobHandler(
 		fireInspectionJobRepository,
 	)
+	fireInspectionDueDateRepository := fireinspectionduedates.NewRepository(db)
+	fireInspectionDueDateHandler := NewFireInspectionDueDateHandler(
+		fireInspectionDueDateRepository,
+	)
 
 	fireInspectionRowRepository := fireinspectionrows.NewRepository(db)
 	fireInspectionRowHandler := NewFireInspectionRowHandler(
@@ -49,6 +59,11 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 		router.Route("/customers", func(router chi.Router) {
 			router.Post("/", customerHandler.Create)
 			router.Get("/", customerHandler.List)
+router.Get("/{customerID}", customerHandler.GetByID)
+			router.Route("/{customerID}/contacts", func(router chi.Router) {
+				router.Post("/", customerContactHandler.Create)
+				router.Get("/", customerContactHandler.ListByCustomer)
+			})
 
 			router.Route("/{customerID}/sites", func(router chi.Router) {
 				router.Post("/", siteHandler.Create)
@@ -77,6 +92,11 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 				extinguisherAssignmentHandler.ListByExtinguisher,
 			)
 			router.Get("/{extinguisherID}", extinguisherHandler.GetByID)
+		})
+
+		router.Route("/fire-inspection-due-dates", func(router chi.Router) {
+			router.Get("/", fireInspectionDueDateHandler.List)
+			router.Post("/", fireInspectionDueDateHandler.Create)
 		})
 
 		router.Route("/fire-inspection-jobs", func(router chi.Router) {
