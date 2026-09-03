@@ -18,6 +18,9 @@ var (
 	ErrCustomerOrSiteNotFound = errors.New("customer or site not found")
 	ErrJobNotFound            = errors.New("fire inspection job not found")
 	ErrJobNotEditable         = errors.New("fire inspection job is not editable")
+	ErrJobNotCompletable      = errors.New("fire inspection job is not completable")
+	ErrUncheckedRows          = errors.New("fire inspection job has unchecked rows")
+	ErrJobNotReopenable       = errors.New("fire inspection job is not reopenable")
 )
 
 type Date struct {
@@ -96,6 +99,35 @@ type Job struct {
 	CreatedByUserID *uuid.UUID `json:"created_by_user_id,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type ListInput struct {
+	View   string
+	Status string
+	Query  string
+	From   *Date
+	To     *Date
+}
+
+type ListItem struct {
+	ID           uuid.UUID `json:"id"`
+	CustomerName string    `json:"customer_name"`
+	SiteName     string    `json:"site_name"`
+	SiteAddress  string    `json:"site_address"`
+	Status       string    `json:"status"`
+
+	ScheduledFor *Date `json:"scheduled_for,omitempty"`
+
+	TotalRows     int `json:"total_rows"`
+	ProcessedRows int `json:"processed_rows"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type ListResponse struct {
+	Items []ListItem `json:"items"`
+	Total int        `json:"total"`
 }
 
 type CreateInput struct {
@@ -534,6 +566,353 @@ func (r *Repository) Update(
 	}
 
 	return r.GetByID(ctx, jobID)
+}
+
+func (r *Repository) List(
+	ctx context.Context,
+	input ListInput,
+) ([]ListItem, error) {
+	queryParts := []string{
+		`
+        SELECT
+            j.id,
+            c.name AS customer_name,
+            s.name AS site_name,
+            s.address_display AS site_address,
+            j.status,
+            j.scheduled_for,
+            COUNT(row.id)::int AS total_rows,
+            COUNT(row.id) FILTER (
+                WHERE row.row_result <> 'NEM_ELLENORIZVE'
+            )::int AS processed_rows,
+            j.created_at,
+            j.updated_at
+        FROM fire_inspection_jobs j
+        JOIN customers c
+            ON c.id = j.customer_id
+        JOIN sites s
+            ON s.id = j.site_id
+        LEFT JOIN fire_inspection_rows row
+            ON row.fire_inspection_job_id = j.id
+        `,
+		`
+        WHERE c.archived_at IS NULL
+          AND s.archived_at IS NULL
+        `,
+	}
+
+	args := make([]any, 0, 5)
+	addArg := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
+	}
+
+	view := strings.ToLower(strings.TrimSpace(input.View))
+
+	switch view {
+	case "", "open":
+		queryParts = append(
+			queryParts,
+			"AND j.archived_at IS NULL",
+			"AND j.status NOT IN ('COMPLETED', 'CANCELLED')",
+		)
+	case "closed":
+		queryParts = append(
+			queryParts,
+			"AND j.archived_at IS NULL",
+			"AND j.status IN ('COMPLETED', 'CANCELLED')",
+		)
+	case "archived":
+		queryParts = append(
+			queryParts,
+			"AND j.archived_at IS NOT NULL",
+		)
+	default:
+		return nil, errors.New("invalid fire inspection job list view")
+	}
+
+	if status := strings.TrimSpace(input.Status); status != "" {
+		placeholder := addArg(status)
+		queryParts = append(queryParts, "AND j.status = "+placeholder)
+	}
+
+	if searchQuery := strings.TrimSpace(input.Query); searchQuery != "" {
+		placeholder := addArg("%" + searchQuery + "%")
+		queryParts = append(
+			queryParts,
+			`
+            AND (
+                c.name ILIKE `+placeholder+`
+                OR s.name ILIKE `+placeholder+`
+                OR s.address_display ILIKE `+placeholder+`
+            )
+            `,
+		)
+	}
+
+	if input.From != nil && !input.From.IsZero() {
+		placeholder := addArg(input.From)
+		queryParts = append(queryParts, "AND j.scheduled_for >= "+placeholder)
+	}
+
+	if input.To != nil && !input.To.IsZero() {
+		placeholder := addArg(input.To)
+		queryParts = append(queryParts, "AND j.scheduled_for <= "+placeholder)
+	}
+
+	queryParts = append(
+		queryParts,
+		`
+        GROUP BY
+            j.id,
+            c.name,
+            s.name,
+            s.address_display
+        ORDER BY
+            j.scheduled_for ASC NULLS LAST,
+            j.updated_at DESC
+        `,
+	)
+
+	rows, err := r.db.Query(ctx, strings.Join(queryParts, "\n"), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]ListItem, 0)
+
+	for rows.Next() {
+		var item ListItem
+
+		if err := rows.Scan(
+			&item.ID,
+			&item.CustomerName,
+			&item.SiteName,
+			&item.SiteAddress,
+			&item.Status,
+			&item.ScheduledFor,
+			&item.TotalRows,
+			&item.ProcessedRows,
+			&item.CreatedAt,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+
+		items = append(items, item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return items, nil
+}
+
+func (r *Repository) Complete(
+	ctx context.Context,
+	jobID uuid.UUID,
+) (Job, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return Job{}, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	var status string
+
+	err = tx.QueryRow(
+		ctx,
+		`
+                SELECT status
+                FROM fire_inspection_jobs
+                WHERE id = $1
+                  AND archived_at IS NULL
+                FOR UPDATE
+                `,
+		jobID,
+	).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Job{}, ErrJobNotFound
+	}
+	if err != nil {
+		return Job{}, err
+	}
+
+	if status == "COMPLETED" || status == "CANCELLED" {
+		return Job{}, ErrJobNotCompletable
+	}
+
+	var uncheckedRows int
+
+	err = tx.QueryRow(
+		ctx,
+		`
+                SELECT COUNT(*)::int
+                FROM fire_inspection_rows
+                WHERE fire_inspection_job_id = $1
+                  AND row_result = 'NEM_ELLENORIZVE'
+                `,
+		jobID,
+	).Scan(&uncheckedRows)
+	if err != nil {
+		return Job{}, err
+	}
+
+	if uncheckedRows > 0 {
+		return Job{}, ErrUncheckedRows
+	}
+
+	_, err = tx.Exec(
+		ctx,
+		`
+                UPDATE fire_inspection_jobs
+                SET
+                        status = 'COMPLETED',
+                        performed_at = COALESCE(performed_at, NOW()),
+                        updated_at = NOW()
+                WHERE id = $1
+                  AND archived_at IS NULL
+                `,
+		jobID,
+	)
+	if err != nil {
+		return Job{}, err
+	}
+
+	const getCompletedJobQuery = `
+                SELECT
+                        id,
+                        customer_id,
+                        site_id,
+                        status,
+                        scheduled_for,
+                        performed_at,
+                        inspection_year,
+                        inspection_quarter,
+                        issued_at,
+                        issued_by_user_id,
+                        issued_by_name_snapshot,
+                        issued_by_company_snapshot,
+                        issued_by_phone_snapshot,
+                        issued_by_email_snapshot,
+                        inspector_name_snapshot,
+                        inspector_certificate_snapshot,
+                        repairer_name_snapshot,
+                        notes,
+                        created_by_user_id,
+                        created_at,
+                        updated_at
+                FROM fire_inspection_jobs
+                WHERE id = $1
+                  AND archived_at IS NULL
+        `
+
+	job, err := scanJob(tx.QueryRow(ctx, getCompletedJobQuery, jobID))
+	if err != nil {
+		return Job{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Job{}, err
+	}
+
+	return job, nil
+}
+
+func (r *Repository) Reopen(
+	ctx context.Context,
+	jobID uuid.UUID,
+) (Job, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return Job{}, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	var status string
+
+	err = tx.QueryRow(
+		ctx,
+		`
+                SELECT status
+                FROM fire_inspection_jobs
+                WHERE id = $1
+                  AND archived_at IS NULL
+                FOR UPDATE
+                `,
+		jobID,
+	).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Job{}, ErrJobNotFound
+	}
+	if err != nil {
+		return Job{}, err
+	}
+
+	if status != "COMPLETED" {
+		return Job{}, ErrJobNotReopenable
+	}
+
+	_, err = tx.Exec(
+		ctx,
+		`
+                UPDATE fire_inspection_jobs
+                SET
+                        status = 'IN_PROGRESS',
+                        updated_at = NOW()
+                WHERE id = $1
+                  AND archived_at IS NULL
+                `,
+		jobID,
+	)
+	if err != nil {
+		return Job{}, err
+	}
+
+	const query = `
+                SELECT
+                        id,
+                        customer_id,
+                        site_id,
+                        status,
+                        scheduled_for,
+                        performed_at,
+                        inspection_year,
+                        inspection_quarter,
+                        issued_at,
+                        issued_by_user_id,
+                        issued_by_name_snapshot,
+                        issued_by_company_snapshot,
+                        issued_by_phone_snapshot,
+                        issued_by_email_snapshot,
+                        inspector_name_snapshot,
+                        inspector_certificate_snapshot,
+                        repairer_name_snapshot,
+                        notes,
+                        created_by_user_id,
+                        created_at,
+                        updated_at
+                FROM fire_inspection_jobs
+                WHERE id = $1
+                  AND archived_at IS NULL
+        `
+
+	job, err := scanJob(tx.QueryRow(ctx, query, jobID))
+	if err != nil {
+		return Job{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Job{}, err
+	}
+
+	return job, nil
 }
 
 func (r *Repository) GetByID(ctx context.Context, jobID uuid.UUID) (Job, error) {

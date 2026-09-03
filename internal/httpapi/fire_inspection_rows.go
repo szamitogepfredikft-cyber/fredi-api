@@ -157,3 +157,82 @@ func (h *fireInspectionRowHandler) Update(
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(row)
 }
+
+func (h *fireInspectionRowHandler) Inspect(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	jobID, ok := pathUUID(w, r, "jobID")
+	if !ok {
+		return
+	}
+
+	rowID, ok := pathUUID(w, r, "rowID")
+	if !ok {
+		return
+	}
+
+	var input fireinspectionrows.InspectInput
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&input); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON request body")
+		return
+	}
+
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	row, err := h.repository.Inspect(ctx, jobID, rowID, input)
+	if err != nil {
+		switch {
+		case errors.Is(err, fireinspectionrows.ErrJobNotFound):
+			writeJSONError(w, http.StatusNotFound, "fire inspection job not found")
+		case errors.Is(err, fireinspectionrows.ErrJobNotEditable):
+			writeJSONError(
+				w,
+				http.StatusConflict,
+				"fire inspection job is not editable",
+			)
+		case errors.Is(err, fireinspectionrows.ErrRowNotFound):
+			writeJSONError(w, http.StatusNotFound, "fire inspection row not found")
+		case errors.Is(err, fireinspectionrows.ErrRowHasNoExtinguisher):
+			writeJSONError(
+				w,
+				http.StatusUnprocessableEntity,
+				"fire inspection row has no assigned extinguisher",
+			)
+		case errors.Is(err, fireinspectionrows.ErrExtinguisherNotActive):
+			writeJSONError(
+				w,
+				http.StatusConflict,
+				"fire extinguisher is not active at customer",
+			)
+		case errors.Is(err, fireinspectionrows.ErrExtinguisherWrongLocation):
+			writeJSONError(
+				w,
+				http.StatusConflict,
+				"fire extinguisher is not assigned to this equipment location",
+			)
+		case errors.Is(err, fireinspectionrows.ErrOKFNumberAlreadyInUse):
+			writeJSONError(
+				w,
+				http.StatusConflict,
+				"OKF number is already used by another active extinguisher",
+			)
+		default:
+			writeJSONError(
+				w,
+				http.StatusInternalServerError,
+				"failed to inspect fire extinguisher",
+			)
+		}
+
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(row)
+}

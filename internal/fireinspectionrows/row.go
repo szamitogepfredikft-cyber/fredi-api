@@ -22,12 +22,16 @@ const (
 )
 
 var (
-	ErrJobNotFound           = errors.New("fire inspection job not found")
-	ErrJobNotEditable        = errors.New("fire inspection job is not editable")
-	ErrRowNotFound           = errors.New("fire inspection row not found")
-	ErrRowDoesNotBelongToJob = errors.New("fire inspection row does not belong to job")
-	ErrInvalidRowResult      = errors.New("invalid fire inspection row result")
-	ErrInvalidCapacity       = errors.New("capacity_kg must be greater than zero")
+	ErrJobNotFound               = errors.New("fire inspection job not found")
+	ErrJobNotEditable            = errors.New("fire inspection job is not editable")
+	ErrRowNotFound               = errors.New("fire inspection row not found")
+	ErrRowDoesNotBelongToJob     = errors.New("fire inspection row does not belong to job")
+	ErrInvalidRowResult          = errors.New("invalid fire inspection row result")
+	ErrInvalidCapacity           = errors.New("capacity_kg must be greater than zero")
+	ErrRowHasNoExtinguisher      = errors.New("fire inspection row has no extinguisher")
+	ErrExtinguisherNotActive     = errors.New("fire extinguisher is not active at customer")
+	ErrExtinguisherWrongLocation = errors.New("fire extinguisher is not assigned to row location")
+	ErrOKFNumberAlreadyInUse     = errors.New("OKF number is already used by an active extinguisher")
 )
 
 type Row struct {
@@ -57,6 +61,11 @@ type UpdateInput struct {
 	ExtinguisherTypeDisplay optionalString
 	CapacityKG              optionalFloat64
 	Notes                   optionalString
+}
+
+type InspectInput struct {
+	OKFNumber string  `json:"okf_number"`
+	Notes     *string `json:"notes"`
 }
 
 type optionalString struct {
@@ -337,6 +346,199 @@ func (r *Repository) ListByJobID(
 	}
 
 	return listByJobID(ctx, r.db, jobID)
+}
+
+func (r *Repository) Inspect(
+	ctx context.Context,
+	jobID uuid.UUID,
+	rowID uuid.UUID,
+	input InspectInput,
+) (Row, error) {
+	okfNumber := strings.TrimSpace(input.OKFNumber)
+
+	if okfNumber == "" {
+		return Row{}, ErrOKFNumberAlreadyInUse
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return Row{}, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	var row Row
+	var jobStatus string
+	var extinguisherStatus string
+	var activeAssignmentLocationID *uuid.UUID
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT
+			r.id,
+			r.fire_inspection_job_id,
+			r.equipment_location_id,
+			r.fire_extinguisher_id,
+			j.status,
+			e.lifecycle_status,
+			a.equipment_location_id
+		FROM fire_inspection_rows r
+		JOIN fire_inspection_jobs j
+			ON j.id = r.fire_inspection_job_id
+		LEFT JOIN fire_extinguishers e
+			ON e.id = r.fire_extinguisher_id
+		   AND e.archived_at IS NULL
+		LEFT JOIN extinguisher_location_assignments a
+			ON a.fire_extinguisher_id = r.fire_extinguisher_id
+		   AND a.unassigned_at IS NULL
+		WHERE r.id = $1
+		  AND r.fire_inspection_job_id = $2
+		  AND j.archived_at IS NULL
+		FOR UPDATE OF r, j
+		`,
+		rowID,
+		jobID,
+	).Scan(
+		&row.ID,
+		&row.FireInspectionJobID,
+		&row.EquipmentLocationID,
+		&row.FireExtinguisherID,
+		&jobStatus,
+		&extinguisherStatus,
+		&activeAssignmentLocationID,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var jobExists bool
+
+		err = tx.QueryRow(
+			ctx,
+			`
+			SELECT EXISTS (
+				SELECT 1
+				FROM fire_inspection_jobs
+				WHERE id = $1
+				  AND archived_at IS NULL
+			)
+			`,
+			jobID,
+		).Scan(&jobExists)
+		if err != nil {
+			return Row{}, err
+		}
+
+		if !jobExists {
+			return Row{}, ErrJobNotFound
+		}
+
+		return Row{}, ErrRowNotFound
+	}
+	if err != nil {
+		return Row{}, err
+	}
+
+	if jobStatus == "COMPLETED" || jobStatus == "CANCELLED" {
+		return Row{}, ErrJobNotEditable
+	}
+
+	if row.FireExtinguisherID == nil {
+		return Row{}, ErrRowHasNoExtinguisher
+	}
+
+	if extinguisherStatus != "ACTIVE_AT_CUSTOMER" {
+		return Row{}, ErrExtinguisherNotActive
+	}
+
+	if activeAssignmentLocationID == nil ||
+		*activeAssignmentLocationID != row.EquipmentLocationID {
+		return Row{}, ErrExtinguisherWrongLocation
+	}
+
+	var existingExtinguisherID uuid.UUID
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT id
+		FROM fire_extinguishers
+		WHERE okf_number = $1
+		  AND lifecycle_status = 'ACTIVE_AT_CUSTOMER'
+		  AND archived_at IS NULL
+		  AND id <> $2
+		FOR UPDATE
+		`,
+		okfNumber,
+		*row.FireExtinguisherID,
+	).Scan(&existingExtinguisherID)
+	if err == nil {
+		return Row{}, ErrOKFNumberAlreadyInUse
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Row{}, err
+	}
+
+	var extinguisherTypeCode string
+	var extinguisherTypeDisplay string
+	var capacityKG *float64
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		UPDATE fire_extinguishers
+		SET
+			okf_number = $1,
+			updated_at = now()
+		WHERE id = $2
+		RETURNING
+			extinguisher_type_code,
+			extinguisher_type_display,
+			capacity_kg
+		`,
+		okfNumber,
+		*row.FireExtinguisherID,
+	).Scan(
+		&extinguisherTypeCode,
+		&extinguisherTypeDisplay,
+		&capacityKG,
+	)
+	if err != nil {
+		return Row{}, err
+	}
+
+	_, err = tx.Exec(
+		ctx,
+		`
+		UPDATE fire_inspection_rows
+		SET
+			row_result = $1,
+			okf_number = $2,
+			extinguisher_type_code = $3,
+			extinguisher_type_display = $4,
+			capacity_kg = $5,
+			notes = $6,
+			updated_at = now()
+		WHERE id = $7
+		  AND fire_inspection_job_id = $8
+		`,
+		RowResultChecked,
+		okfNumber,
+		extinguisherTypeCode,
+		extinguisherTypeDisplay,
+		capacityKG,
+		normalizedOptionalString(input.Notes),
+		rowID,
+		jobID,
+	)
+	if err != nil {
+		return Row{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Row{}, err
+	}
+
+	return r.GetByID(ctx, jobID, rowID)
 }
 
 func (r *Repository) Update(

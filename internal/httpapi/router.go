@@ -81,16 +81,33 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 
 		router.Route("/fire-inspection-jobs", func(router chi.Router) {
 			router.Post("/", fireInspectionJobHandler.Create)
+			router.Get("/", fireInspectionJobHandler.List)
+
 			router.Get("/{jobID}", fireInspectionJobHandler.GetByID)
 			router.Patch("/{jobID}", fireInspectionJobHandler.Update)
+			router.Post(
+				"/{jobID}:complete",
+				fireInspectionJobHandler.Complete,
+			)
+			router.Post(
+				"/{jobID}:reopen",
+				fireInspectionJobHandler.Reopen,
+			)
 			router.Post(
 				"/{jobID}/rows:initialize",
 				fireInspectionRowHandler.Initialize,
 			)
+
 			router.Get(
 				"/{jobID}/rows",
 				fireInspectionRowHandler.List,
 			)
+
+			router.Post(
+				"/{jobID}/rows/{rowID}:inspect",
+				fireInspectionRowHandler.Inspect,
+			)
+
 			router.Patch(
 				"/{jobID}/rows/{rowID}",
 				fireInspectionRowHandler.Update,
