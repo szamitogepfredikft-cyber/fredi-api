@@ -113,12 +113,22 @@ func (h *fireInspectionJobHandler) Create(
 
 	job, err := h.repository.Create(ctx, input)
 	if err != nil {
-		if errors.Is(err, fireinspectionjobs.ErrCustomerOrSiteNotFound) {
+		switch {
+		case errors.Is(err, fireinspectionjobs.ErrCustomerOrSiteNotFound):
 			writeJSONError(w, http.StatusNotFound, "customer or site not found")
-			return
+		case errors.Is(err, fireinspectionjobs.ErrInspectorNotSelectable):
+			writeJSONError(
+				w,
+				http.StatusConflict,
+				"the selected inspector must be active and have exactly one active certificate",
+			)
+		default:
+			writeJSONError(
+				w,
+				http.StatusInternalServerError,
+				"failed to create fire inspection job",
+			)
 		}
-
-		writeJSONError(w, http.StatusInternalServerError, "failed to create fire inspection job")
 		return
 	}
 

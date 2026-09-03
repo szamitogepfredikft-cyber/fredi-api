@@ -12,6 +12,7 @@ import (
 	"github.com/hajdurenato/fredi-api/internal/fireinspectionduedates"
 	"github.com/hajdurenato/fredi-api/internal/fireinspectionjobs"
 	"github.com/hajdurenato/fredi-api/internal/fireinspectionrows"
+	"github.com/hajdurenato/fredi-api/internal/inspectors"
 	"github.com/hajdurenato/fredi-api/internal/sites"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -20,7 +21,6 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 	router := chi.NewRouter()
 
 	router.Get("/health", HealthHandler(db))
-
 	customerRepository := customers.NewRepository(db)
 	customerHandler := NewCustomerHandler(customerRepository)
 	customerContactRepository := customercontacts.NewRepository(db)
@@ -55,6 +55,9 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 		fireInspectionRowRepository,
 	)
 
+	inspectorRepository := inspectors.NewRepository(db)
+	inspectorHandler := NewInspectorHandler(inspectorRepository)
+
 	router.Route("/api/v1", func(router chi.Router) {
 		router.Route("/customers", func(router chi.Router) {
 			router.Post("/", customerHandler.Create)
@@ -64,6 +67,7 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 			router.Route("/{customerID}/contacts", func(router chi.Router) {
 				router.Post("/", customerContactHandler.Create)
 				router.Get("/", customerContactHandler.ListByCustomer)
+				router.Patch("/{contactID}", customerContactHandler.Update)
 			})
 
 			router.Route("/{customerID}/sites", func(router chi.Router) {
@@ -93,6 +97,32 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 				extinguisherAssignmentHandler.ListByExtinguisher,
 			)
 			router.Get("/{extinguisherID}", extinguisherHandler.GetByID)
+		})
+
+		router.Route("/inspectors", func(router chi.Router) {
+			router.Get("/", inspectorHandler.List)
+			router.Post("/", inspectorHandler.Create)
+			router.Get("/{inspectorID}", inspectorHandler.GetByID)
+			router.Patch("/{inspectorID}", inspectorHandler.Update)
+			router.Post("/{inspectorID}:archive", inspectorHandler.Archive)
+			router.Post("/{inspectorID}:restore", inspectorHandler.Restore)
+
+			router.Post(
+				"/{inspectorID}/certificates",
+				inspectorHandler.CreateCertificate,
+			)
+			router.Patch(
+				"/{inspectorID}/certificates/{certificateID}",
+				inspectorHandler.UpdateCertificate,
+			)
+			router.Post(
+				"/{inspectorID}/certificates/{certificateID}:archive",
+				inspectorHandler.ArchiveCertificate,
+			)
+			router.Post(
+				"/{inspectorID}/certificates/{certificateID}:restore",
+				inspectorHandler.RestoreCertificate,
+			)
 		})
 
 		router.Route("/fire-inspection-due-dates", func(router chi.Router) {

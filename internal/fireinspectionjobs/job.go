@@ -16,6 +16,7 @@ import (
 
 var (
 	ErrCustomerOrSiteNotFound = errors.New("customer or site not found")
+	ErrInspectorNotSelectable = errors.New("inspector is not selectable")
 	ErrJobNotFound            = errors.New("fire inspection job not found")
 	ErrJobNotEditable         = errors.New("fire inspection job is not editable")
 	ErrJobNotCompletable      = errors.New("fire inspection job is not completable")
@@ -92,6 +93,8 @@ type Job struct {
 	IssuedByEmailSnapshot   *string `json:"issued_by_email_snapshot,omitempty"`
 
 	InspectorNameSnapshot        *string `json:"inspector_name_snapshot,omitempty"`
+	InspectorPhoneSnapshot       *string `json:"inspector_phone_snapshot,omitempty"`
+	InspectorEmailSnapshot       *string `json:"inspector_email_snapshot,omitempty"`
 	InspectorCertificateSnapshot *string `json:"inspector_certificate_snapshot,omitempty"`
 	RepairerNameSnapshot         *string `json:"repairer_name_snapshot,omitempty"`
 
@@ -141,9 +144,10 @@ type CreateInput struct {
 	IssuedByPhone   *string `json:"issued_by_phone"`
 	IssuedByEmail   *string `json:"issued_by_email"`
 
-	InspectorName        *string `json:"inspector_name"`
-	InspectorCertificate *string `json:"inspector_certificate"`
-	RepairerName         *string `json:"repairer_name"`
+	InspectorID          *uuid.UUID `json:"inspector_id"`
+	InspectorName        *string    `json:"inspector_name"`
+	InspectorCertificate *string    `json:"inspector_certificate"`
+	RepairerName         *string    `json:"repairer_name"`
 }
 type optionalString struct {
 	Set   bool
@@ -346,7 +350,57 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error) {
 	inspectionQuarter, inspectionYear := quarterFromDate(input.ScheduledFor)
 
+	if input.InspectorID != nil {
+		const selectableInspectorQuery = `
+			SELECT EXISTS (
+				SELECT 1
+				FROM inspectors i
+				WHERE i.id = $1
+				  AND i.archived_at IS NULL
+				  AND (
+					SELECT COUNT(*)
+					FROM inspector_certificates c
+					WHERE c.inspector_id = i.id
+					  AND c.archived_at IS NULL
+				  ) = 1
+			)
+		`
+
+		var selectable bool
+
+		if err := r.db.QueryRow(
+			ctx,
+			selectableInspectorQuery,
+			*input.InspectorID,
+		).Scan(&selectable); err != nil {
+			return Job{}, err
+		}
+
+		if !selectable {
+			return Job{}, ErrInspectorNotSelectable
+		}
+	}
+
 	const createQuery = `
+		WITH selected_inspector AS (
+			SELECT
+				i.name,
+				i.phone,
+				i.email,
+				c.certificate_number
+			FROM inspectors i
+			JOIN inspector_certificates c
+				ON c.inspector_id = i.id
+				AND c.archived_at IS NULL
+			WHERE i.id = $10
+				AND i.archived_at IS NULL
+			AND (
+				SELECT COUNT(*)
+				FROM inspector_certificates active_certificates
+				WHERE active_certificates.inspector_id = i.id
+				  AND active_certificates.archived_at IS NULL
+			) = 1
+		)
 		INSERT INTO fire_inspection_jobs (
 			customer_id,
 			site_id,
@@ -359,6 +413,8 @@ func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error)
 			issued_by_phone_snapshot,
 			issued_by_email_snapshot,
 			inspector_name_snapshot,
+			inspector_phone_snapshot,
+			inspector_email_snapshot,
 			inspector_certificate_snapshot,
 			repairer_name_snapshot,
 			notes
@@ -374,10 +430,24 @@ func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error)
 			$7,
 			$8,
 			$9,
-			$10,
-			$11,
-			$12,
-			$13
+			CASE
+				WHEN $10::uuid IS NULL THEN $11
+				ELSE (SELECT name FROM selected_inspector)
+			END,
+			CASE
+				WHEN $10::uuid IS NULL THEN NULL
+				ELSE (SELECT phone FROM selected_inspector)
+			END,
+			CASE
+				WHEN $10::uuid IS NULL THEN NULL
+				ELSE (SELECT email FROM selected_inspector)
+			END,
+			CASE
+				WHEN $10::uuid IS NULL THEN $12
+				ELSE (SELECT certificate_number FROM selected_inspector)
+			END,
+			$13,
+			$14
 		WHERE EXISTS (
 			SELECT 1
 			FROM customers
@@ -390,6 +460,10 @@ func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error)
 			WHERE id = $2
 			  AND customer_id = $1
 			  AND archived_at IS NULL
+		)
+		AND (
+			$10::uuid IS NULL
+			OR EXISTS (SELECT 1 FROM selected_inspector)
 		)
 		RETURNING
 			id,
@@ -407,6 +481,8 @@ func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error)
 			issued_by_phone_snapshot,
 			issued_by_email_snapshot,
 			inspector_name_snapshot,
+			inspector_phone_snapshot,
+			inspector_email_snapshot,
 			inspector_certificate_snapshot,
 			repairer_name_snapshot,
 			notes,
@@ -427,6 +503,7 @@ func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error)
 		optionalTrimmedString(input.IssuedByCompany),
 		optionalTrimmedString(input.IssuedByPhone),
 		optionalTrimmedString(input.IssuedByEmail),
+		input.InspectorID,
 		optionalTrimmedString(input.InspectorName),
 		optionalTrimmedString(input.InspectorCertificate),
 		optionalTrimmedString(input.RepairerName),
@@ -800,6 +877,8 @@ func (r *Repository) Complete(
                         issued_by_phone_snapshot,
                         issued_by_email_snapshot,
                         inspector_name_snapshot,
+                        inspector_phone_snapshot,
+                        inspector_email_snapshot,
                         inspector_certificate_snapshot,
                         repairer_name_snapshot,
                         notes,
@@ -892,6 +971,8 @@ func (r *Repository) Reopen(
                         issued_by_phone_snapshot,
                         issued_by_email_snapshot,
                         inspector_name_snapshot,
+                        inspector_phone_snapshot,
+                        inspector_email_snapshot,
                         inspector_certificate_snapshot,
                         repairer_name_snapshot,
                         notes,
@@ -933,6 +1014,8 @@ func (r *Repository) GetByID(ctx context.Context, jobID uuid.UUID) (Job, error) 
 			issued_by_phone_snapshot,
 			issued_by_email_snapshot,
 			inspector_name_snapshot,
+			inspector_phone_snapshot,
+			inspector_email_snapshot,
 			inspector_certificate_snapshot,
 			repairer_name_snapshot,
 			notes,
@@ -979,6 +1062,8 @@ func scanJob(row rowScanner) (Job, error) {
 		&job.IssuedByPhoneSnapshot,
 		&job.IssuedByEmailSnapshot,
 		&job.InspectorNameSnapshot,
+		&job.InspectorPhoneSnapshot,
+		&job.InspectorEmailSnapshot,
 		&job.InspectorCertificateSnapshot,
 		&job.RepairerNameSnapshot,
 		&job.Notes,
