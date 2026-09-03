@@ -43,6 +43,7 @@ type Row struct {
 	ExtinguisherTypeCode    *string    `json:"extinguisher_type_code,omitempty"`
 	ExtinguisherTypeDisplay *string    `json:"extinguisher_type_display,omitempty"`
 	CapacityKG              *float64   `json:"capacity_kg,omitempty"`
+	InspectionQuarter       *string    `json:"inspection_quarter,omitempty"`
 	Notes                   *string    `json:"notes,omitempty"`
 	SortOrder               int        `json:"sort_order"`
 	CreatedAt               time.Time  `json:"created_at"`
@@ -256,7 +257,8 @@ func (r *Repository) InitializeForJob(
 			extinguisher_type_code,
 			extinguisher_type_display,
 			capacity_kg,
-			sort_order
+			sort_order,
+                        inspection_quarter
 		)
 		SELECT
 			j.id,
@@ -267,8 +269,9 @@ func (r *Repository) InitializeForJob(
 			e.extinguisher_type_code,
 			e.extinguisher_type_display,
 			e.capacity_kg,
-			l.sort_order
-		FROM fire_inspection_jobs j
+			l.sort_order,
+		        j.inspection_quarter
+                FROM fire_inspection_jobs j
 		JOIN customers c
 			ON c.id = j.customer_id
 		   AND c.archived_at IS NULL
@@ -489,7 +492,8 @@ func (r *Repository) GetByID(
 			r.extinguisher_type_code,
 			r.extinguisher_type_display,
 			r.capacity_kg,
-			r.notes,
+			r.inspection_quarter,
+                        r.notes,
 			r.sort_order,
 			r.created_at,
 			r.updated_at
@@ -515,6 +519,7 @@ func (r *Repository) GetByID(
 		&row.ExtinguisherTypeCode,
 		&row.ExtinguisherTypeDisplay,
 		&row.CapacityKG,
+		&row.InspectionQuarter,
 		&row.Notes,
 		&row.SortOrder,
 		&row.CreatedAt,
@@ -555,7 +560,8 @@ func listByJobID(
 			r.extinguisher_type_code,
 			r.extinguisher_type_display,
 			r.capacity_kg,
-			r.notes,
+			r.inspection_quarter,
+                        r.notes,
 			r.sort_order,
 			r.created_at,
 			r.updated_at
@@ -590,6 +596,7 @@ func listByJobID(
 			&row.ExtinguisherTypeCode,
 			&row.ExtinguisherTypeDisplay,
 			&row.CapacityKG,
+			&row.InspectionQuarter,
 			&row.Notes,
 			&row.SortOrder,
 			&row.CreatedAt,

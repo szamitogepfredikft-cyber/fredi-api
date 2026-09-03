@@ -27,6 +27,7 @@ func (d *Date) UnmarshalJSON(data []byte) error {
 	}
 
 	var value string
+
 	if err := json.Unmarshal(data, &value); err != nil {
 		return errors.New("date must be a JSON string in YYYY-MM-DD format")
 	}
@@ -37,6 +38,7 @@ func (d *Date) UnmarshalJSON(data []byte) error {
 	}
 
 	d.Time = parsed
+
 	return nil
 }
 
@@ -56,6 +58,7 @@ func (d *Date) Scan(src any) error {
 	}
 
 	d.Time = value
+
 	return nil
 }
 
@@ -64,12 +67,28 @@ func (d Date) Value() (driver.Value, error) {
 }
 
 type Job struct {
-	ID              uuid.UUID  `json:"id"`
-	CustomerID      uuid.UUID  `json:"customer_id"`
-	SiteID          uuid.UUID  `json:"site_id"`
-	Status          string     `json:"status"`
-	ScheduledFor    *Date      `json:"scheduled_for,omitempty"`
-	PerformedAt     *time.Time `json:"performed_at,omitempty"`
+	ID         uuid.UUID `json:"id"`
+	CustomerID uuid.UUID `json:"customer_id"`
+	SiteID     uuid.UUID `json:"site_id"`
+	Status     string    `json:"status"`
+
+	ScheduledFor      *Date      `json:"scheduled_for,omitempty"`
+	PerformedAt       *time.Time `json:"performed_at,omitempty"`
+	InspectionYear    *int       `json:"inspection_year,omitempty"`
+	InspectionQuarter *string    `json:"inspection_quarter,omitempty"`
+
+	IssuedAt       *time.Time `json:"issued_at,omitempty"`
+	IssuedByUserID *uuid.UUID `json:"issued_by_user_id,omitempty"`
+
+	IssuedByNameSnapshot    *string `json:"issued_by_name_snapshot,omitempty"`
+	IssuedByCompanySnapshot *string `json:"issued_by_company_snapshot,omitempty"`
+	IssuedByPhoneSnapshot   *string `json:"issued_by_phone_snapshot,omitempty"`
+	IssuedByEmailSnapshot   *string `json:"issued_by_email_snapshot,omitempty"`
+
+	InspectorNameSnapshot        *string `json:"inspector_name_snapshot,omitempty"`
+	InspectorCertificateSnapshot *string `json:"inspector_certificate_snapshot,omitempty"`
+	RepairerNameSnapshot         *string `json:"repairer_name_snapshot,omitempty"`
+
 	Notes           *string    `json:"notes,omitempty"`
 	CreatedByUserID *uuid.UUID `json:"created_by_user_id,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
@@ -81,6 +100,15 @@ type CreateInput struct {
 	SiteID       uuid.UUID `json:"site_id"`
 	ScheduledFor *Date     `json:"scheduled_for"`
 	Notes        *string   `json:"notes"`
+
+	IssuedByName    *string `json:"issued_by_name"`
+	IssuedByCompany *string `json:"issued_by_company"`
+	IssuedByPhone   *string `json:"issued_by_phone"`
+	IssuedByEmail   *string `json:"issued_by_email"`
+
+	InspectorName        *string `json:"inspector_name"`
+	InspectorCertificate *string `json:"inspector_certificate"`
+	RepairerName         *string `json:"repairer_name"`
 }
 
 type Repository struct {
@@ -92,18 +120,40 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 }
 
 func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error) {
+	inspectionQuarter, inspectionYear := quarterFromDate(input.ScheduledFor)
+
 	const createQuery = `
 		INSERT INTO fire_inspection_jobs (
 			customer_id,
 			site_id,
 			scheduled_for,
+			inspection_year,
+			inspection_quarter,
+			issued_at,
+			issued_by_name_snapshot,
+			issued_by_company_snapshot,
+			issued_by_phone_snapshot,
+			issued_by_email_snapshot,
+			inspector_name_snapshot,
+			inspector_certificate_snapshot,
+			repairer_name_snapshot,
 			notes
 		)
 		SELECT
 			$1,
 			$2,
 			$3,
-			$4
+			$4,
+			$5,
+			NOW(),
+			$6,
+			$7,
+			$8,
+			$9,
+			$10,
+			$11,
+			$12,
+			$13
 		WHERE EXISTS (
 			SELECT 1
 			FROM customers
@@ -124,6 +174,17 @@ func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error)
 			status,
 			scheduled_for,
 			performed_at,
+			inspection_year,
+			inspection_quarter,
+			issued_at,
+			issued_by_user_id,
+			issued_by_name_snapshot,
+			issued_by_company_snapshot,
+			issued_by_phone_snapshot,
+			issued_by_email_snapshot,
+			inspector_name_snapshot,
+			inspector_certificate_snapshot,
+			repairer_name_snapshot,
 			notes,
 			created_by_user_id,
 			created_at,
@@ -136,6 +197,15 @@ func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error)
 		input.CustomerID,
 		input.SiteID,
 		input.ScheduledFor,
+		inspectionYear,
+		inspectionQuarter,
+		optionalTrimmedString(input.IssuedByName),
+		optionalTrimmedString(input.IssuedByCompany),
+		optionalTrimmedString(input.IssuedByPhone),
+		optionalTrimmedString(input.IssuedByEmail),
+		optionalTrimmedString(input.InspectorName),
+		optionalTrimmedString(input.InspectorCertificate),
+		optionalTrimmedString(input.RepairerName),
 		optionalTrimmedString(input.Notes),
 	))
 	if err != nil {
@@ -158,6 +228,17 @@ func (r *Repository) GetByID(ctx context.Context, jobID uuid.UUID) (Job, error) 
 			status,
 			scheduled_for,
 			performed_at,
+			inspection_year,
+			inspection_quarter,
+			issued_at,
+			issued_by_user_id,
+			issued_by_name_snapshot,
+			issued_by_company_snapshot,
+			issued_by_phone_snapshot,
+			issued_by_email_snapshot,
+			inspector_name_snapshot,
+			inspector_certificate_snapshot,
+			repairer_name_snapshot,
 			notes,
 			created_by_user_id,
 			created_at,
@@ -193,6 +274,17 @@ func scanJob(row rowScanner) (Job, error) {
 		&job.Status,
 		&job.ScheduledFor,
 		&job.PerformedAt,
+		&job.InspectionYear,
+		&job.InspectionQuarter,
+		&job.IssuedAt,
+		&job.IssuedByUserID,
+		&job.IssuedByNameSnapshot,
+		&job.IssuedByCompanySnapshot,
+		&job.IssuedByPhoneSnapshot,
+		&job.IssuedByEmailSnapshot,
+		&job.InspectorNameSnapshot,
+		&job.InspectorCertificateSnapshot,
+		&job.RepairerNameSnapshot,
 		&job.Notes,
 		&job.CreatedByUserID,
 		&job.CreatedAt,
@@ -203,6 +295,29 @@ func scanJob(row rowScanner) (Job, error) {
 	}
 
 	return job, nil
+}
+
+func quarterFromDate(value *Date) (*string, *int) {
+	if value == nil || value.IsZero() {
+		return nil, nil
+	}
+
+	year := value.Year()
+
+	var quarter string
+
+	switch value.Month() {
+	case time.January, time.February, time.March:
+		quarter = "Q1"
+	case time.April, time.May, time.June:
+		quarter = "Q2"
+	case time.July, time.August, time.September:
+		quarter = "Q3"
+	default:
+		quarter = "Q4"
+	}
+
+	return &quarter, &year
 }
 
 func optionalTrimmedString(value *string) *string {
