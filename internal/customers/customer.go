@@ -31,6 +31,13 @@ type CreateInput struct {
 	Notes                 *string `json:"notes"`
 }
 
+type UpdateInput struct {
+	Name                  *string `json:"name"`
+	TaxNumber             *string `json:"tax_number"`
+	BillingAddressDisplay *string `json:"billing_address_display"`
+	Notes                 *string `json:"notes"`
+}
+
 type Repository struct {
 	db *pgxpool.Pool
 }
@@ -181,6 +188,81 @@ func (r *Repository) GetByID(
 	}
 
 	return customer, nil
+}
+
+func (r *Repository) Update(
+	ctx context.Context,
+	customerID uuid.UUID,
+	input UpdateInput,
+) (Customer, error) {
+	name := strings.TrimSpace(input.NameOrEmpty())
+	if name == "" {
+		return Customer{}, errors.New("name is required")
+	}
+
+	normalizedName := normalizeName(name)
+
+	const query = `
+		UPDATE customers
+		SET
+			name = $2,
+			normalized_name = $3,
+			tax_number = $4,
+			billing_address_display = $5,
+			notes = $6,
+			updated_at = now()
+		WHERE id = $1
+			AND archived_at IS NULL
+		RETURNING
+			id,
+			name,
+			normalized_name,
+			tax_number,
+			billing_address_display,
+			notes,
+			created_at,
+			updated_at
+	`
+
+	var customer Customer
+
+	err := r.db.QueryRow(
+		ctx,
+		query,
+		customerID,
+		name,
+		normalizedName,
+		optionalTrimmedString(input.TaxNumber),
+		optionalTrimmedString(input.BillingAddressDisplay),
+		optionalTrimmedString(input.Notes),
+	).Scan(
+		&customer.ID,
+		&customer.Name,
+		&customer.NormalizedName,
+		&customer.TaxNumber,
+		&customer.BillingAddressDisplay,
+		&customer.Notes,
+		&customer.CreatedAt,
+		&customer.UpdatedAt,
+	)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return Customer{}, ErrTaxNumberAlreadyExists
+		}
+
+		return Customer{}, err
+	}
+
+	return customer, nil
+}
+
+func (i UpdateInput) NameOrEmpty() string {
+	if i.Name == nil {
+		return ""
+	}
+
+	return *i.Name
 }
 
 func normalizeName(value string) string {

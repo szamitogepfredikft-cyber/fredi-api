@@ -95,6 +95,49 @@ func (h *customerHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(customer)
 }
 
+func (h *customerHandler) Update(w http.ResponseWriter, r *http.Request) {
+	customerID, ok := pathUUID(w, r, "customerID")
+	if !ok {
+		return
+	}
+
+	var input customers.UpdateInput
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&input); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON request body")
+		return
+	}
+
+	if input.Name == nil || strings.TrimSpace(*input.Name) == "" {
+		writeJSONError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	customer, err := h.repository.Update(ctx, customerID, input)
+	if err != nil {
+		switch {
+		case errors.Is(err, customers.ErrTaxNumberAlreadyExists):
+			writeJSONError(
+				w,
+				http.StatusConflict,
+				"an active customer with this tax number already exists",
+			)
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "failed to update customer")
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(customer)
+}
+
 func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

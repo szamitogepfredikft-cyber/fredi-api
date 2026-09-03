@@ -59,7 +59,8 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 		router.Route("/customers", func(router chi.Router) {
 			router.Post("/", customerHandler.Create)
 			router.Get("/", customerHandler.List)
-router.Get("/{customerID}", customerHandler.GetByID)
+			router.Get("/{customerID}", customerHandler.GetByID)
+			router.Patch("/{customerID}", customerHandler.Update)
 			router.Route("/{customerID}/contacts", func(router chi.Router) {
 				router.Post("/", customerContactHandler.Create)
 				router.Get("/", customerContactHandler.ListByCustomer)
