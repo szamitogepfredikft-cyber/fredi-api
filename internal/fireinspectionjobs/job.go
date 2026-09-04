@@ -843,46 +843,11 @@ func (r *Repository) Complete(
 		return Job{}, err
 	}
 
-	const getCompletedJobQuery = `
-                SELECT
-                        id,
-                        customer_id,
-                        site_id,
-                        status,
-                        scheduled_for,
-                        performed_at,
-                        inspection_year,
-                        inspection_quarter,
-                        issued_at,
-                        issued_by_user_id,
-                        issued_by_name_snapshot,
-                        issued_by_company_snapshot,
-                        issued_by_phone_snapshot,
-                        issued_by_email_snapshot,
-                        inspector_name_snapshot,
-                        inspector_phone_snapshot,
-                        inspector_email_snapshot,
-                        inspector_certificate_snapshot,
-                        repairer_name_snapshot,
-                        notes,
-                        created_by_user_id,
-                        created_at,
-                        updated_at
-                FROM fire_inspection_jobs
-                WHERE id = $1
-                  AND archived_at IS NULL
-        `
-
-	job, err := scanJob(tx.QueryRow(ctx, getCompletedJobQuery, jobID))
-	if err != nil {
-		return Job{}, err
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return Job{}, err
 	}
 
-	return job, nil
+	return r.GetByID(ctx, jobID)
 }
 
 func (r *Repository) Reopen(
