@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -298,4 +299,29 @@ func optionalTrimmedString(value *string) *string {
 	}
 
 	return &trimmed
+}
+
+func (r *Repository) Archive(
+	ctx context.Context,
+	customerID uuid.UUID,
+) error {
+	const query = `
+		UPDATE customers
+		SET
+			archived_at = now(),
+			updated_at = now()
+		WHERE id = $1
+			AND archived_at IS NULL
+	`
+
+	commandTag, err := r.db.Exec(ctx, query, customerID)
+	if err != nil {
+		return err
+	}
+
+	if commandTag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+
+	return nil
 }

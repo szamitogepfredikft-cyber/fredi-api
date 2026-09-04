@@ -64,6 +64,8 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 			router.Get("/", customerHandler.List)
 			router.Get("/{customerID}", customerHandler.GetByID)
 			router.Patch("/{customerID}", customerHandler.Update)
+
+			router.Delete("/{customerID}", customerHandler.Archive)
 			router.Route("/{customerID}/contacts", func(router chi.Router) {
 				router.Post("/", customerContactHandler.Create)
 				router.Get("/", customerContactHandler.ListByCustomer)
@@ -75,6 +77,8 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 				router.Get("/", siteHandler.ListByCustomer)
 			})
 		})
+
+		router.Patch("/sites/{siteID}", siteHandler.Update)
 
 		router.Route("/sites/{siteID}/equipment-locations", func(router chi.Router) {
 			router.Post("/", equipmentLocationHandler.Create)
@@ -154,6 +158,10 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 				fireInspectionRowHandler.List,
 			)
 
+			router.Post(
+				"/{jobID}/rows",
+				fireInspectionRowHandler.Create,
+			)
 			router.Post(
 				"/{jobID}/rows/{rowID}:inspect",
 				fireInspectionRowHandler.Inspect,

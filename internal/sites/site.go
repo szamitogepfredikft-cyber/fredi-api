@@ -45,6 +45,18 @@ type CreateInput struct {
 	Notes          *string `json:"notes"`
 }
 
+type UpdateInput struct {
+	Name           *string `json:"name"`
+	PostalCode     *string `json:"postal_code"`
+	City           string  `json:"city"`
+	StreetName     *string `json:"street_name"`
+	StreetType     *string `json:"street_type"`
+	HouseNumber    *string `json:"house_number"`
+	AddressExtra   *string `json:"address_extra"`
+	AddressDisplay string  `json:"address_display"`
+	Notes          *string `json:"notes"`
+}
+
 type Repository struct {
 	db *pgxpool.Pool
 }
@@ -248,6 +260,87 @@ func (r *Repository) GetByID(ctx context.Context, siteID uuid.UUID) (Site, error
 			return Site{}, ErrSiteNotFound
 		}
 
+		return Site{}, err
+	}
+
+	return site, nil
+}
+
+func (r *Repository) Update(
+	ctx context.Context,
+	siteID uuid.UUID,
+	input UpdateInput,
+) (Site, error) {
+	const query = `
+		UPDATE sites
+		SET
+			name = $2,
+			normalized_name = $3,
+			postal_code = $4,
+			city = $5,
+			street_name = $6,
+			street_type = $7,
+			house_number = $8,
+			address_extra = $9,
+			address_display = $10,
+			notes = $11,
+			updated_at = now()
+		WHERE id = $1
+			AND archived_at IS NULL
+		RETURNING
+			id,
+			customer_id,
+			name,
+			normalized_name,
+			postal_code,
+			city,
+			street_name,
+			street_type,
+			house_number,
+			address_extra,
+			address_display,
+			notes,
+			created_at,
+			updated_at
+	`
+
+	name := optionalTrimmedString(input.Name)
+	var site Site
+
+	err := r.db.QueryRow(
+		ctx,
+		query,
+		siteID,
+		name,
+		optionalNormalizedName(name),
+		optionalTrimmedString(input.PostalCode),
+		strings.TrimSpace(input.City),
+		optionalTrimmedString(input.StreetName),
+		optionalTrimmedString(input.StreetType),
+		optionalTrimmedString(input.HouseNumber),
+		optionalTrimmedString(input.AddressExtra),
+		strings.TrimSpace(input.AddressDisplay),
+		optionalTrimmedString(input.Notes),
+	).Scan(
+		&site.ID,
+		&site.CustomerID,
+		&site.Name,
+		&site.NormalizedName,
+		&site.PostalCode,
+		&site.City,
+		&site.StreetName,
+		&site.StreetType,
+		&site.HouseNumber,
+		&site.AddressExtra,
+		&site.AddressDisplay,
+		&site.Notes,
+		&site.CreatedAt,
+		&site.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Site{}, ErrSiteNotFound
+		}
 		return Site{}, err
 	}
 

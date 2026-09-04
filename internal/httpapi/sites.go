@@ -90,6 +90,49 @@ func (h *siteHandler) ListByCustomer(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(siteList)
 }
 
+func (h *siteHandler) Update(w http.ResponseWriter, r *http.Request) {
+	siteID, ok := pathUUID(w, r, "siteID")
+	if !ok {
+		return
+	}
+
+	var input sites.UpdateInput
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&input); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON request body")
+		return
+	}
+
+	if strings.TrimSpace(input.City) == "" {
+		writeJSONError(w, http.StatusBadRequest, "city is required")
+		return
+	}
+
+	if strings.TrimSpace(input.AddressDisplay) == "" {
+		writeJSONError(w, http.StatusBadRequest, "address_display is required")
+		return
+	}
+
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	site, err := h.repository.Update(ctx, siteID, input)
+	if err != nil {
+		if errors.Is(err, sites.ErrSiteNotFound) {
+			writeJSONError(w, http.StatusNotFound, "site not found")
+			return
+		}
+
+		writeJSONError(w, http.StatusInternalServerError, "failed to update site")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(site)
+}
+
 func (h *siteHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	siteID, ok := pathUUID(w, r, "siteID")
 	if !ok {

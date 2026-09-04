@@ -32,6 +32,8 @@ var (
 	ErrExtinguisherNotActive     = errors.New("fire extinguisher is not active at customer")
 	ErrExtinguisherWrongLocation = errors.New("fire extinguisher is not assigned to row location")
 	ErrOKFNumberAlreadyInUse     = errors.New("OKF number is already used by an active extinguisher")
+	ErrLocationCodeAlreadyExists = errors.New("equipment location code already exists at job site")
+	ErrLocationAlreadyExists     = errors.New("equipment location description already exists at job site")
 )
 
 type Row struct {
@@ -52,6 +54,15 @@ type Row struct {
 	SortOrder               int        `json:"sort_order"`
 	CreatedAt               time.Time  `json:"created_at"`
 	UpdatedAt               time.Time  `json:"updated_at"`
+}
+
+type CreateInput struct {
+	LocationCode     string  `json:"location_code"`
+	LocationName     string  `json:"location_name"`
+	ExtinguisherType string  `json:"extinguisher_type"`
+	CapacityKG       float64 `json:"capacity_kg"`
+	OKFNumber        string  `json:"okf_number"`
+	Notes            *string `json:"notes"`
 }
 
 type UpdateInput struct {
@@ -198,6 +209,257 @@ type Repository struct {
 
 func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}
+}
+
+func (r *Repository) CreateForJob(
+	ctx context.Context,
+	jobID uuid.UUID,
+	input CreateInput,
+) (Row, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return Row{}, err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	var siteID uuid.UUID
+	var jobStatus string
+	var inspectionQuarter *string
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT j.site_id, j.status, j.inspection_quarter
+		FROM fire_inspection_jobs j
+		JOIN customers c
+			ON c.id = j.customer_id
+			AND c.archived_at IS NULL
+		JOIN sites s
+			ON s.id = j.site_id
+			AND s.customer_id = j.customer_id
+			AND s.archived_at IS NULL
+		WHERE j.id = $1
+			AND j.archived_at IS NULL
+		FOR UPDATE OF j
+		`,
+		jobID,
+	).Scan(&siteID, &jobStatus, &inspectionQuarter)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Row{}, ErrJobNotFound
+	}
+	if err != nil {
+		return Row{}, err
+	}
+
+	if jobStatus == "COMPLETED" || jobStatus == "CANCELLED" {
+		return Row{}, ErrJobNotEditable
+	}
+
+	locationCode := strings.TrimSpace(input.LocationCode)
+	locationName := strings.TrimSpace(input.LocationName)
+	extinguisherType := strings.TrimSpace(input.ExtinguisherType)
+	okfNumber := strings.TrimSpace(input.OKFNumber)
+
+	if locationName == "" || extinguisherType == "" || okfNumber == "" || input.CapacityKG <= 0 {
+		return Row{}, ErrInvalidCapacity
+	}
+
+	if locationCode != "" {
+		var existingLocationID uuid.UUID
+
+		err = tx.QueryRow(
+			ctx,
+			`
+			SELECT id
+			FROM fire_equipment_locations
+			WHERE site_id = $1
+				AND archived_at IS NULL
+				AND location_code = $2
+			`,
+			siteID,
+			locationCode,
+		).Scan(&existingLocationID)
+		if err == nil {
+			return Row{}, ErrLocationCodeAlreadyExists
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return Row{}, err
+		}
+	}
+
+	var existingLocationID uuid.UUID
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT id
+		FROM fire_equipment_locations
+		WHERE site_id = $1
+			AND archived_at IS NULL
+			AND normalized_description = $2
+		`,
+		siteID,
+		normalizeLocationDescription(locationName),
+	).Scan(&existingLocationID)
+	if err == nil {
+		return Row{}, ErrLocationAlreadyExists
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Row{}, err
+	}
+
+	var existingExtinguisherID uuid.UUID
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT id
+		FROM fire_extinguishers
+		WHERE okf_number = $1
+			AND lifecycle_status = 'ACTIVE_AT_CUSTOMER'
+			AND archived_at IS NULL
+		FOR UPDATE
+		`,
+		okfNumber,
+	).Scan(&existingExtinguisherID)
+	if err == nil {
+		return Row{}, ErrOKFNumberAlreadyInUse
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Row{}, err
+	}
+
+	var nextSortOrder int
+
+	if err := tx.QueryRow(
+		ctx,
+		`
+		SELECT COALESCE(MAX(sort_order), 0) + 1
+		FROM fire_equipment_locations
+		WHERE site_id = $1
+			AND archived_at IS NULL
+		`,
+		siteID,
+	).Scan(&nextSortOrder); err != nil {
+		return Row{}, err
+	}
+
+	var locationID uuid.UUID
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		INSERT INTO fire_equipment_locations (
+			site_id,
+			location_code,
+			description,
+			normalized_description,
+			sort_order,
+			notes
+		)
+		VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6)
+		RETURNING id
+		`,
+		siteID,
+		locationCode,
+		locationName,
+		normalizeLocationDescription(locationName),
+		nextSortOrder,
+		normalizedOptionalString(input.Notes),
+	).Scan(&locationID)
+	if err != nil {
+		return Row{}, err
+	}
+
+	var extinguisherID uuid.UUID
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		INSERT INTO fire_extinguishers (
+			okf_number,
+			extinguisher_type_code,
+			extinguisher_type_display,
+			capacity_kg,
+			lifecycle_status,
+			notes
+		)
+		VALUES ($1, $2, $3, $4, 'ACTIVE_AT_CUSTOMER', $5)
+		RETURNING id
+		`,
+		okfNumber,
+		extinguisherType,
+		extinguisherType,
+		input.CapacityKG,
+		normalizedOptionalString(input.Notes),
+	).Scan(&extinguisherID)
+	if err != nil {
+		return Row{}, err
+	}
+
+	_, err = tx.Exec(
+		ctx,
+		`
+		INSERT INTO extinguisher_location_assignments (
+			equipment_location_id,
+			fire_extinguisher_id,
+			assignment_reason,
+			notes
+		)
+		VALUES ($1, $2, 'INITIAL_ASSIGNMENT', $3)
+		`,
+		locationID,
+		extinguisherID,
+		normalizedOptionalString(input.Notes),
+	)
+	if err != nil {
+		return Row{}, err
+	}
+
+	var rowID uuid.UUID
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		INSERT INTO fire_inspection_rows (
+			fire_inspection_job_id,
+			equipment_location_id,
+			fire_extinguisher_id,
+			row_result,
+			okf_number,
+			extinguisher_type_code,
+			extinguisher_type_display,
+			capacity_kg,
+			inspection_quarter,
+			notes,
+			sort_order
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		RETURNING id
+		`,
+		jobID,
+		locationID,
+		extinguisherID,
+		RowResultChecked,
+		okfNumber,
+		extinguisherType,
+		extinguisherType,
+		input.CapacityKG,
+		inspectionQuarter,
+		normalizedOptionalString(input.Notes),
+		nextSortOrder,
+	).Scan(&rowID)
+	if err != nil {
+		return Row{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Row{}, err
+	}
+
+	return r.GetByID(ctx, jobID, rowID)
 }
 
 func (r *Repository) InitializeForJob(
@@ -839,4 +1101,26 @@ func normalizedOptionalString(value *string) *string {
 	}
 
 	return &trimmed
+}
+
+func normalizeLocationDescription(value string) string {
+	value = strings.TrimSpace(strings.ToUpper(value))
+
+	replacer := strings.NewReplacer(
+		"Á", "A",
+		"É", "E",
+		"Í", "I",
+		"Ó", "O",
+		"Ö", "O",
+		"Ő", "O",
+		"Ú", "U",
+		"Ü", "U",
+		"Ű", "U",
+		" ", "",
+		".", "",
+		",", "",
+		"-", "",
+	)
+
+	return replacer.Replace(value)
 }

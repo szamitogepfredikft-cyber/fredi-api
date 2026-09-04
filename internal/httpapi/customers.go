@@ -138,6 +138,28 @@ func (h *customerHandler) Update(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(customer)
 }
 
+func (h *customerHandler) Archive(w http.ResponseWriter, r *http.Request) {
+	customerID, ok := pathUUID(w, r, "customerID")
+	if !ok {
+		return
+	}
+
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	if err := h.repository.Archive(ctx, customerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeJSONError(w, http.StatusNotFound, "customer not found")
+			return
+		}
+
+		writeJSONError(w, http.StatusInternalServerError, "failed to archive customer")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
