@@ -74,10 +74,12 @@ func (d Date) Value() (driver.Value, error) {
 }
 
 type Job struct {
-	ID         uuid.UUID `json:"id"`
-	CustomerID uuid.UUID `json:"customer_id"`
-	SiteID     uuid.UUID `json:"site_id"`
-	Status     string    `json:"status"`
+	ID           uuid.UUID `json:"id"`
+	CustomerID   uuid.UUID `json:"customer_id"`
+	CustomerName string    `json:"customer_name"`
+	SiteAddress  string    `json:"site_address"`
+	SiteID       uuid.UUID `json:"site_id"`
+	Status       string    `json:"status"`
 
 	ScheduledFor      *Date      `json:"scheduled_for,omitempty"`
 	PerformedAt       *time.Time `json:"performed_at,omitempty"`
@@ -115,8 +117,8 @@ type ListInput struct {
 type ListItem struct {
 	ID           uuid.UUID `json:"id"`
 	CustomerName string    `json:"customer_name"`
-	SiteName     string    `json:"site_name"`
 	SiteAddress  string    `json:"site_address"`
+	SiteName     string    `json:"site_name"`
 	Status       string    `json:"status"`
 
 	ScheduledFor *Date `json:"scheduled_for,omitempty"`
@@ -135,6 +137,8 @@ type ListResponse struct {
 
 type CreateInput struct {
 	CustomerID   uuid.UUID `json:"customer_id"`
+	CustomerName string    `json:"customer_name"`
+	SiteAddress  string    `json:"site_address"`
 	SiteID       uuid.UUID `json:"site_id"`
 	ScheduledFor *Date     `json:"scheduled_for"`
 	Notes        *string   `json:"notes"`
@@ -465,33 +469,12 @@ func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error)
 			$10::uuid IS NULL
 			OR EXISTS (SELECT 1 FROM selected_inspector)
 		)
-		RETURNING
-			id,
-			customer_id,
-			site_id,
-			status,
-			scheduled_for,
-			performed_at,
-			inspection_year,
-			inspection_quarter,
-			issued_at,
-			issued_by_user_id,
-			issued_by_name_snapshot,
-			issued_by_company_snapshot,
-			issued_by_phone_snapshot,
-			issued_by_email_snapshot,
-			inspector_name_snapshot,
-			inspector_phone_snapshot,
-			inspector_email_snapshot,
-			inspector_certificate_snapshot,
-			repairer_name_snapshot,
-			notes,
-			created_by_user_id,
-			created_at,
-			updated_at
+		RETURNING id
 	`
 
-	job, err := scanJob(r.db.QueryRow(
+	var jobID uuid.UUID
+
+	err := r.db.QueryRow(
 		ctx,
 		createQuery,
 		input.CustomerID,
@@ -508,7 +491,7 @@ func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error)
 		optionalTrimmedString(input.InspectorCertificate),
 		optionalTrimmedString(input.RepairerName),
 		optionalTrimmedString(input.Notes),
-	))
+	).Scan(&jobID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Job{}, ErrCustomerOrSiteNotFound
@@ -517,7 +500,7 @@ func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error)
 		return Job{}, err
 	}
 
-	return job, nil
+	return r.GetByID(ctx, jobID)
 }
 
 func (r *Repository) Update(
@@ -999,32 +982,41 @@ func (r *Repository) Reopen(
 func (r *Repository) GetByID(ctx context.Context, jobID uuid.UUID) (Job, error) {
 	const query = `
 		SELECT
-			id,
-			customer_id,
-			site_id,
-			status,
-			scheduled_for,
-			performed_at,
-			inspection_year,
-			inspection_quarter,
-			issued_at,
-			issued_by_user_id,
-			issued_by_name_snapshot,
-			issued_by_company_snapshot,
-			issued_by_phone_snapshot,
-			issued_by_email_snapshot,
-			inspector_name_snapshot,
-			inspector_phone_snapshot,
-			inspector_email_snapshot,
-			inspector_certificate_snapshot,
-			repairer_name_snapshot,
-			notes,
-			created_by_user_id,
-			created_at,
-			updated_at
-		FROM fire_inspection_jobs
-		WHERE id = $1
-		  AND archived_at IS NULL
+			j.id,
+			j.customer_id,
+			c.name AS customer_name,
+                        s.address_display AS site_address,
+			j.site_id,
+			j.status,
+			j.scheduled_for,
+			j.performed_at,
+			j.inspection_year,
+			j.inspection_quarter,
+			j.issued_at,
+			j.issued_by_user_id,
+			j.issued_by_name_snapshot,
+			j.issued_by_company_snapshot,
+			j.issued_by_phone_snapshot,
+			j.issued_by_email_snapshot,
+			j.inspector_name_snapshot,
+			j.inspector_phone_snapshot,
+			j.inspector_email_snapshot,
+			j.inspector_certificate_snapshot,
+			j.repairer_name_snapshot,
+			j.notes,
+			j.created_by_user_id,
+			j.created_at,
+			j.updated_at
+		FROM fire_inspection_jobs j
+		JOIN customers c
+			ON c.id = j.customer_id
+			AND c.archived_at IS NULL
+                JOIN sites s
+                        ON s.id = j.site_id
+                        AND s.customer_id = j.customer_id
+                        AND s.archived_at IS NULL
+		WHERE j.id = $1
+			AND j.archived_at IS NULL
 	`
 
 	job, err := scanJob(r.db.QueryRow(ctx, query, jobID))
@@ -1049,6 +1041,8 @@ func scanJob(row rowScanner) (Job, error) {
 	err := row.Scan(
 		&job.ID,
 		&job.CustomerID,
+		&job.CustomerName,
+		&job.SiteAddress,
 		&job.SiteID,
 		&job.Status,
 		&job.ScheduledFor,
