@@ -103,11 +103,6 @@ func (h *fireInspectionJobHandler) Create(
 		return
 	}
 
-	if input.SiteID == uuid.Nil {
-		writeJSONError(w, http.StatusBadRequest, "site_id is required")
-		return
-	}
-
 	ctx, cancel := contextWithTimeout(r, 5*time.Second)
 	defer cancel()
 
@@ -173,6 +168,12 @@ func (h *fireInspectionJobHandler) Update(
 				w,
 				http.StatusConflict,
 				"fire inspection job is not editable",
+			)
+		case errors.Is(err, fireinspectionjobs.ErrInspectorNotSelectable):
+			writeJSONError(
+				w,
+				http.StatusConflict,
+				"the selected inspector must be active and have exactly one active certificate",
 			)
 		default:
 			writeJSONError(
@@ -277,6 +278,33 @@ func (h *fireInspectionJobHandler) Reopen(
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(job)
+}
+
+func (h *fireInspectionJobHandler) DeleteDraft(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	jobID, ok := pathUUID(w, r, "jobID")
+	if !ok {
+		return
+	}
+
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	if err := h.repository.DeleteDraft(ctx, jobID); err != nil {
+		switch {
+		case errors.Is(err, fireinspectionjobs.ErrJobNotFound):
+			writeJSONError(w, http.StatusNotFound, "fire inspection job not found")
+		case errors.Is(err, fireinspectionjobs.ErrJobNotDeletable):
+			writeJSONError(w, http.StatusConflict, "only draft fire inspection jobs can be deleted")
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "failed to delete fire inspection job")
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *fireInspectionJobHandler) GetByID(

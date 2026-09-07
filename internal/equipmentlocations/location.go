@@ -37,6 +37,10 @@ type CreateInput struct {
 	Notes        *string `json:"notes"`
 }
 
+type UpdateInput struct {
+	Description string `json:"description"`
+}
+
 type Repository struct {
 	db *pgxpool.Pool
 }
@@ -123,6 +127,53 @@ func (r *Repository) Create(
 			return Location{}, ErrLocationCodeAlreadyExists
 		}
 
+		return Location{}, err
+	}
+
+	return location, nil
+}
+
+func (r *Repository) Update(
+	ctx context.Context,
+	locationID uuid.UUID,
+	input UpdateInput,
+) (Location, error) {
+	description := strings.TrimSpace(input.Description)
+
+	const query = `
+                UPDATE fire_equipment_locations
+                SET
+                        description = $2,
+                        normalized_description = $3,
+                        updated_at = now()
+                WHERE id = $1
+                  AND archived_at IS NULL
+                RETURNING
+                        id,
+                        site_id,
+                        location_code,
+                        description,
+                        normalized_description,
+                        floor_or_zone,
+                        sort_order,
+                        notes,
+                        created_at,
+                        updated_at
+        `
+
+	location, err := scanLocation(
+		r.db.QueryRow(
+			ctx,
+			query,
+			locationID,
+			description,
+			normalizeText(description),
+		),
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Location{}, ErrLocationNotFound
+	}
+	if err != nil {
 		return Location{}, err
 	}
 

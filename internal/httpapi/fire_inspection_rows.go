@@ -207,7 +207,7 @@ func (h *fireInspectionRowHandler) Update(
 			writeJSONError(
 				w,
 				http.StatusBadRequest,
-				"row_result must be one of: ELLENORIZVE, JAVITAS, HIANYZIK",
+				"row_result must be one of: ELLENORIZVE, JAVITAS, UJ, HIANYZIK",
 			)
 		case errors.Is(err, fireinspectionrows.ErrInvalidCapacity):
 			writeJSONError(
@@ -228,6 +228,42 @@ func (h *fireInspectionRowHandler) Update(
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(row)
+}
+
+func (h *fireInspectionRowHandler) Delete(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	jobID, ok := pathUUID(w, r, "jobID")
+	if !ok {
+		return
+	}
+
+	rowID, ok := pathUUID(w, r, "rowID")
+	if !ok {
+		return
+	}
+
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	if err := h.repository.Delete(ctx, jobID, rowID); err != nil {
+		switch {
+		case errors.Is(err, fireinspectionrows.ErrJobNotFound):
+			writeJSONError(w, http.StatusNotFound, "fire inspection job not found")
+		case errors.Is(err, fireinspectionrows.ErrJobNotEditable):
+			writeJSONError(w, http.StatusConflict, "fire inspection job is not editable")
+		case errors.Is(err, fireinspectionrows.ErrRowNotFound):
+			writeJSONError(w, http.StatusNotFound, "fire inspection row not found")
+		case errors.Is(err, fireinspectionrows.ErrRowDoesNotBelongToJob):
+			writeJSONError(w, http.StatusNotFound, "fire inspection row not found for this job")
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "failed to delete fire inspection row")
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *fireInspectionRowHandler) Inspect(

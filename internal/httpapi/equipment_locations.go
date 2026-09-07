@@ -74,6 +74,48 @@ func (h *equipmentLocationHandler) Create(
 	_ = json.NewEncoder(w).Encode(location)
 }
 
+func (h *equipmentLocationHandler) Update(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	locationID, ok := pathUUID(w, r, "locationID")
+	if !ok {
+		return
+	}
+
+	var input equipmentlocations.UpdateInput
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&input); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON request body")
+		return
+	}
+
+	if strings.TrimSpace(input.Description) == "" {
+		writeJSONError(w, http.StatusBadRequest, "description is required")
+		return
+	}
+
+	ctx, cancel := contextWithTimeout(r, 5*time.Second)
+	defer cancel()
+
+	location, err := h.repository.Update(ctx, locationID, input)
+	if err != nil {
+		if errors.Is(err, equipmentlocations.ErrLocationNotFound) {
+			writeJSONError(w, http.StatusNotFound, "equipment location not found")
+			return
+		}
+
+		writeJSONError(w, http.StatusInternalServerError, "failed to update equipment location")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(location)
+}
+
 func (h *equipmentLocationHandler) ListBySite(
 	w http.ResponseWriter,
 	r *http.Request,

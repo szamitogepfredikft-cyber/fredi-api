@@ -22,6 +22,7 @@ var (
 	ErrJobNotCompletable      = errors.New("fire inspection job is not completable")
 	ErrUncheckedRows          = errors.New("fire inspection job has unchecked rows")
 	ErrJobNotReopenable       = errors.New("fire inspection job is not reopenable")
+	ErrJobNotDeletable        = errors.New("only draft fire inspection jobs can be deleted")
 )
 
 type Date struct {
@@ -74,12 +75,12 @@ func (d Date) Value() (driver.Value, error) {
 }
 
 type Job struct {
-	ID           uuid.UUID `json:"id"`
-	CustomerID   uuid.UUID `json:"customer_id"`
-	CustomerName string    `json:"customer_name"`
-	SiteAddress  string    `json:"site_address"`
-	SiteID       uuid.UUID `json:"site_id"`
-	Status       string    `json:"status"`
+	ID           uuid.UUID  `json:"id"`
+	CustomerID   uuid.UUID  `json:"customer_id"`
+	CustomerName string     `json:"customer_name"`
+	SiteAddress  string     `json:"site_address"`
+	SiteID       *uuid.UUID `json:"site_id,omitempty"`
+	Status       string     `json:"status"`
 
 	ScheduledFor      *Date      `json:"scheduled_for,omitempty"`
 	PerformedAt       *time.Time `json:"performed_at,omitempty"`
@@ -136,12 +137,12 @@ type ListResponse struct {
 }
 
 type CreateInput struct {
-	CustomerID   uuid.UUID `json:"customer_id"`
-	CustomerName string    `json:"customer_name"`
-	SiteAddress  string    `json:"site_address"`
-	SiteID       uuid.UUID `json:"site_id"`
-	ScheduledFor *Date     `json:"scheduled_for"`
-	Notes        *string   `json:"notes"`
+	CustomerID   uuid.UUID  `json:"customer_id"`
+	CustomerName string     `json:"customer_name"`
+	SiteAddress  string     `json:"site_address"`
+	SiteID       *uuid.UUID `json:"site_id,omitempty"`
+	ScheduledFor *Date      `json:"scheduled_for"`
+	Notes        *string    `json:"notes"`
 
 	IssuedByName    *string `json:"issued_by_name"`
 	IssuedByCompany *string `json:"issued_by_company"`
@@ -169,16 +170,24 @@ type optionalTime struct {
 }
 
 type UpdateInput struct {
+	CustomerID           optionalUUID
+	SiteID               optionalUUID
 	ScheduledFor         optionalDate
 	PerformedAt          optionalTime
 	IssuedByName         optionalString
 	IssuedByCompany      optionalString
 	IssuedByPhone        optionalString
 	IssuedByEmail        optionalString
+	InspectorID          optionalUUID
 	InspectorName        optionalString
 	InspectorCertificate optionalString
 	RepairerName         optionalString
 	Notes                optionalString
+}
+
+type optionalUUID struct {
+	Set   bool
+	Value *uuid.UUID
 }
 
 func (i *UpdateInput) UnmarshalJSON(data []byte) error {
@@ -189,12 +198,15 @@ func (i *UpdateInput) UnmarshalJSON(data []byte) error {
 	}
 
 	allowedFields := map[string]struct{}{
+		"customer_id":           {},
+		"site_id":               {},
 		"scheduled_for":         {},
 		"performed_at":          {},
 		"issued_by_name":        {},
 		"issued_by_company":     {},
 		"issued_by_phone":       {},
 		"issued_by_email":       {},
+		"inspector_id":          {},
 		"inspector_name":        {},
 		"inspector_certificate": {},
 		"repairer_name":         {},
@@ -205,6 +217,14 @@ func (i *UpdateInput) UnmarshalJSON(data []byte) error {
 		if _, ok := allowedFields[field]; !ok {
 			return errors.New("unknown JSON field")
 		}
+	}
+
+	if err := decodeOptionalUUID(raw, "customer_id", &i.CustomerID); err != nil {
+		return err
+	}
+
+	if err := decodeOptionalUUID(raw, "site_id", &i.SiteID); err != nil {
+		return err
 	}
 
 	if err := decodeOptionalDate(raw, "scheduled_for", &i.ScheduledFor); err != nil {
@@ -231,6 +251,17 @@ func (i *UpdateInput) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
+	if value, ok := raw["inspector_id"]; ok {
+		i.InspectorID.Set = true
+		if string(value) != "null" {
+			var inspectorID uuid.UUID
+			if err := json.Unmarshal(value, &inspectorID); err != nil {
+				return errors.New("inspector_id must be a UUID or null")
+			}
+			i.InspectorID.Value = &inspectorID
+		}
+	}
+
 	if err := decodeOptionalString(raw, "inspector_name", &i.InspectorName); err != nil {
 		return err
 	}
@@ -251,6 +282,35 @@ func (i *UpdateInput) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
+	return nil
+}
+func decodeOptionalUUID(
+	raw map[string]json.RawMessage,
+	field string,
+	target *optionalUUID,
+) error {
+	value, ok := raw[field]
+	if !ok {
+		return nil
+	}
+
+	target.Set = true
+
+	if string(value) == "null" {
+		target.Value = nil
+		return nil
+	}
+
+	var decoded uuid.UUID
+	if err := json.Unmarshal(value, &decoded); err != nil {
+		return errors.New(field + " must be a UUID or null")
+	}
+
+	if decoded == uuid.Nil {
+		return errors.New(field + " must be a valid UUID or null")
+	}
+
+	target.Value = &decoded
 	return nil
 }
 
@@ -458,13 +518,16 @@ func (r *Repository) Create(ctx context.Context, input CreateInput) (Job, error)
 			WHERE id = $1
 			  AND archived_at IS NULL
 		)
-		AND EXISTS (
-			SELECT 1
-			FROM sites
-			WHERE id = $2
-			  AND customer_id = $1
-			  AND archived_at IS NULL
-		)
+                AND (
+                        $2::uuid IS NULL
+                        OR EXISTS (
+                                SELECT 1
+                                FROM sites
+                                WHERE id = $2
+                                  AND customer_id = $1
+                                  AND archived_at IS NULL
+                        )
+                )
 		AND (
 			$10::uuid IS NULL
 			OR EXISTS (SELECT 1 FROM selected_inspector)
@@ -513,11 +576,11 @@ func (r *Repository) Update(
 	err := r.db.QueryRow(
 		ctx,
 		`
-		SELECT status
-		FROM fire_inspection_jobs
-		WHERE id = $1
-		  AND archived_at IS NULL
-		`,
+                SELECT status
+                FROM fire_inspection_jobs
+                WHERE id = $1
+                  AND archived_at IS NULL
+                `,
 		jobID,
 	).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -531,6 +594,48 @@ func (r *Repository) Update(
 		return Job{}, ErrJobNotEditable
 	}
 
+	if input.CustomerID.Set && input.CustomerID.Value == nil {
+		return Job{}, ErrCustomerOrSiteNotFound
+	}
+
+	if input.SiteID.Set && input.SiteID.Value == nil {
+		return Job{}, ErrCustomerOrSiteNotFound
+	}
+
+	if input.InspectorID.Set && input.InspectorID.Value == nil {
+		return Job{}, ErrInspectorNotSelectable
+	}
+
+	if input.InspectorID.Set {
+		const selectableInspectorQuery = `
+                        SELECT EXISTS (
+                                SELECT 1
+                                FROM inspectors i
+                                WHERE i.id = $1
+                                  AND i.archived_at IS NULL
+                                  AND (
+                                        SELECT COUNT(*)
+                                        FROM inspector_certificates c
+                                        WHERE c.inspector_id = i.id
+                                          AND c.archived_at IS NULL
+                                  ) = 1
+                        )
+                `
+
+		var selectable bool
+		if err := r.db.QueryRow(
+			ctx,
+			selectableInspectorQuery,
+			*input.InspectorID.Value,
+		).Scan(&selectable); err != nil {
+			return Job{}, err
+		}
+
+		if !selectable {
+			return Job{}, ErrInspectorNotSelectable
+		}
+	}
+
 	var inspectionQuarter *string
 	var inspectionYear *int
 
@@ -539,65 +644,118 @@ func (r *Repository) Update(
 	}
 
 	const query = `
-		UPDATE fire_inspection_jobs
-		SET
-			scheduled_for = CASE
-				WHEN $2 THEN $3
-				ELSE scheduled_for
-			END,
-			inspection_year = CASE
-				WHEN $2 THEN $4
-				ELSE inspection_year
-			END,
-			inspection_quarter = CASE
-				WHEN $2 THEN $5
-				ELSE inspection_quarter
-			END,
-			performed_at = CASE
-				WHEN $6 THEN $7
-				ELSE performed_at
-			END,
-			issued_by_name_snapshot = CASE
-				WHEN $8 THEN $9
-				ELSE issued_by_name_snapshot
-			END,
-			issued_by_company_snapshot = CASE
-				WHEN $10 THEN $11
-				ELSE issued_by_company_snapshot
-			END,
-			issued_by_phone_snapshot = CASE
-				WHEN $12 THEN $13
-				ELSE issued_by_phone_snapshot
-			END,
-			issued_by_email_snapshot = CASE
-				WHEN $14 THEN $15
-				ELSE issued_by_email_snapshot
-			END,
-			inspector_name_snapshot = CASE
-				WHEN $16 THEN $17
-				ELSE inspector_name_snapshot
-			END,
-			inspector_certificate_snapshot = CASE
-				WHEN $18 THEN $19
-				ELSE inspector_certificate_snapshot
-			END,
-			repairer_name_snapshot = CASE
-				WHEN $20 THEN $21
-				ELSE repairer_name_snapshot
-			END,
-			notes = CASE
-				WHEN $22 THEN $23
-				ELSE notes
-			END,
-			updated_at = now()
-		WHERE id = $1
-		  AND archived_at IS NULL
-	`
+                WITH selected_inspector AS (
+                        SELECT i.name, i.phone, i.email, c.certificate_number
+                        FROM inspectors i
+                        JOIN inspector_certificates c
+                          ON c.inspector_id = i.id
+                         AND c.archived_at IS NULL
+                        WHERE i.id = $20
+                          AND i.archived_at IS NULL
+                )
+                UPDATE fire_inspection_jobs
+                SET
+                        customer_id = CASE
+                                WHEN $2 THEN $3
+                                ELSE customer_id
+                        END,
+                        site_id = CASE
+                                WHEN $4 THEN $5
+                                ELSE site_id
+                        END,
+                        scheduled_for = CASE
+                                WHEN $6 THEN $7
+                                ELSE scheduled_for
+                        END,
+                        inspection_year = CASE
+                                WHEN $6 THEN $8
+                                ELSE inspection_year
+                        END,
+                        inspection_quarter = CASE
+                                WHEN $6 THEN $9
+                                ELSE inspection_quarter
+                        END,
+                        performed_at = CASE
+                                WHEN $10 THEN $11
+                                ELSE performed_at
+                        END,
+                        issued_by_name_snapshot = CASE
+                                WHEN $12 THEN $13
+                                ELSE issued_by_name_snapshot
+                        END,
+                        issued_by_company_snapshot = CASE
+                                WHEN $14 THEN $15
+                                ELSE issued_by_company_snapshot
+                        END,
+                        issued_by_phone_snapshot = CASE
+                                WHEN $16 THEN $17
+                                ELSE issued_by_phone_snapshot
+                        END,
+                        issued_by_email_snapshot = CASE
+                                WHEN $18 THEN $19
+                                ELSE issued_by_email_snapshot
+                        END,
+                        inspector_name_snapshot = CASE
+                                WHEN $20::uuid IS NOT NULL THEN (SELECT name FROM selected_inspector)
+                                WHEN $21 THEN $22
+                                ELSE inspector_name_snapshot
+                        END,
+                        inspector_phone_snapshot = CASE
+                                WHEN $20::uuid IS NOT NULL THEN (SELECT phone FROM selected_inspector)
+                                ELSE inspector_phone_snapshot
+                        END,
+                        inspector_email_snapshot = CASE
+                                WHEN $20::uuid IS NOT NULL THEN (SELECT email FROM selected_inspector)
+                                ELSE inspector_email_snapshot
+                        END,
+                        inspector_certificate_snapshot = CASE
+                                WHEN $20::uuid IS NOT NULL THEN (SELECT certificate_number FROM selected_inspector)
+                                WHEN $23 THEN $24
+                                ELSE inspector_certificate_snapshot
+                        END,
+                        repairer_name_snapshot = CASE
+                                WHEN $25 THEN $26
+                                ELSE repairer_name_snapshot
+                        END,
+                        notes = CASE
+                                WHEN $27 THEN $28
+                                ELSE notes
+                        END,
+                        updated_at = now()
+                WHERE id = $1
+                  AND archived_at IS NULL
+                  AND (
+                        NOT $2
+                        OR EXISTS (
+                                SELECT 1
+                                FROM customers c
+                                WHERE c.id = $3
+                                  AND c.archived_at IS NULL
+                        )
+                  )
+                  AND (
+                        NOT $4
+                        OR EXISTS (
+                                SELECT 1
+                                FROM sites s
+                                WHERE s.id = $5
+                                  AND s.archived_at IS NULL
+                                  AND s.customer_id = CASE
+                                        WHEN $2 THEN $3
+                                        ELSE fire_inspection_jobs.customer_id
+                                  END
+                        )
+                  )
+        `
 
-	_, err = r.db.Exec(
+	commandTag, err := r.db.Exec(
 		ctx,
 		query,
 		jobID,
+		input.CustomerID.Set,
+		input.CustomerID.Value,
+		input.SiteID.Set,
+		input.SiteID.Value,
 		input.ScheduledFor.Set,
 		input.ScheduledFor.Value,
 		inspectionYear,
@@ -612,6 +770,7 @@ func (r *Repository) Update(
 		optionalTrimmedString(input.IssuedByPhone.Value),
 		input.IssuedByEmail.Set,
 		optionalTrimmedString(input.IssuedByEmail.Value),
+		input.InspectorID.Value,
 		input.InspectorName.Set,
 		optionalTrimmedString(input.InspectorName.Value),
 		input.InspectorCertificate.Set,
@@ -625,9 +784,12 @@ func (r *Repository) Update(
 		return Job{}, err
 	}
 
+	if commandTag.RowsAffected() != 1 {
+		return Job{}, ErrCustomerOrSiteNotFound
+	}
+
 	return r.GetByID(ctx, jobID)
 }
-
 func (r *Repository) List(
 	ctx context.Context,
 	input ListInput,
@@ -637,8 +799,8 @@ func (r *Repository) List(
         SELECT
             j.id,
             c.name AS customer_name,
-            s.name AS site_name,
-            s.address_display AS site_address,
+            COALESCE(s.name, 'NINCS TELEPHELY') AS site_name,
+            COALESCE(s.address_display, 'NINCS TELEPHELY') AS site_address,
             j.status,
             j.scheduled_for,
             COUNT(row.id)::int AS total_rows,
@@ -650,14 +812,14 @@ func (r *Repository) List(
         FROM fire_inspection_jobs j
         JOIN customers c
             ON c.id = j.customer_id
-        JOIN sites s
+        LEFT JOIN sites s
             ON s.id = j.site_id
         LEFT JOIN fire_inspection_rows row
             ON row.fire_inspection_job_id = j.id
         `,
 		`
         WHERE c.archived_at IS NULL
-          AND s.archived_at IS NULL
+          AND (s.id IS NULL OR s.archived_at IS NULL)
         `,
 	}
 
@@ -902,46 +1064,48 @@ func (r *Repository) Reopen(
 		return Job{}, err
 	}
 
-	const query = `
-                SELECT
-                        id,
-                        customer_id,
-                        site_id,
-                        status,
-                        scheduled_for,
-                        performed_at,
-                        inspection_year,
-                        inspection_quarter,
-                        issued_at,
-                        issued_by_user_id,
-                        issued_by_name_snapshot,
-                        issued_by_company_snapshot,
-                        issued_by_phone_snapshot,
-                        issued_by_email_snapshot,
-                        inspector_name_snapshot,
-                        inspector_phone_snapshot,
-                        inspector_email_snapshot,
-                        inspector_certificate_snapshot,
-                        repairer_name_snapshot,
-                        notes,
-                        created_by_user_id,
-                        created_at,
-                        updated_at
-                FROM fire_inspection_jobs
-                WHERE id = $1
-                  AND archived_at IS NULL
-        `
-
-	job, err := scanJob(tx.QueryRow(ctx, query, jobID))
-	if err != nil {
-		return Job{}, err
-	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return Job{}, err
 	}
 
-	return job, nil
+	return r.GetByID(ctx, jobID)
+}
+
+func (r *Repository) DeleteDraft(ctx context.Context, jobID uuid.UUID) error {
+	result, err := r.db.Exec(
+		ctx,
+		`
+		UPDATE fire_inspection_jobs
+		SET
+			archived_at = now(),
+			updated_at = now()
+		WHERE id = $1
+		  AND archived_at IS NULL
+		  AND status = 'DRAFT'
+		`,
+		jobID,
+	)
+	if err != nil {
+		return err
+	}
+
+	if result.RowsAffected() == 0 {
+		var exists bool
+		err = r.db.QueryRow(
+			ctx,
+			`SELECT EXISTS (SELECT 1 FROM fire_inspection_jobs WHERE id = $1 AND archived_at IS NULL)`,
+			jobID,
+		).Scan(&exists)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return ErrJobNotFound
+		}
+		return ErrJobNotDeletable
+	}
+
+	return nil
 }
 
 func (r *Repository) GetByID(ctx context.Context, jobID uuid.UUID) (Job, error) {
@@ -950,7 +1114,7 @@ func (r *Repository) GetByID(ctx context.Context, jobID uuid.UUID) (Job, error) 
 			j.id,
 			j.customer_id,
 			c.name AS customer_name,
-                        s.address_display AS site_address,
+                        COALESCE(s.address_display, 'NINCS TELEPHELY') AS site_address,
 			j.site_id,
 			j.status,
 			j.scheduled_for,
@@ -976,7 +1140,7 @@ func (r *Repository) GetByID(ctx context.Context, jobID uuid.UUID) (Job, error) 
 		JOIN customers c
 			ON c.id = j.customer_id
 			AND c.archived_at IS NULL
-                JOIN sites s
+                LEFT JOIN sites s
                         ON s.id = j.site_id
                         AND s.customer_id = j.customer_id
                         AND s.archived_at IS NULL

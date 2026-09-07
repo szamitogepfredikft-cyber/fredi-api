@@ -132,6 +132,8 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 		router.Route("/fire-inspection-due-dates", func(router chi.Router) {
 			router.Get("/", fireInspectionDueDateHandler.List)
 			router.Post("/", fireInspectionDueDateHandler.Create)
+			router.Post("/:sync-annual", fireInspectionDueDateHandler.SyncAnnual)
+			router.Patch("/{dueDateID}", fireInspectionDueDateHandler.Update)
 		})
 
 		router.Route("/fire-inspection-jobs", func(router chi.Router) {
@@ -140,6 +142,7 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 
 			router.Get("/{jobID}", fireInspectionJobHandler.GetByID)
 			router.Patch("/{jobID}", fireInspectionJobHandler.Update)
+			router.Delete("/{jobID}", fireInspectionJobHandler.DeleteDraft)
 			router.Post(
 				"/{jobID}:complete",
 				fireInspectionJobHandler.Complete,
@@ -171,10 +174,15 @@ func NewRouter(db *pgxpool.Pool) http.Handler {
 				"/{jobID}/rows/{rowID}",
 				fireInspectionRowHandler.Update,
 			)
+			router.Delete(
+				"/{jobID}/rows/{rowID}",
+				fireInspectionRowHandler.Delete,
+			)
 		})
 
 		router.Get("/sites/{siteID}", siteHandler.GetByID)
 		router.Get("/equipment-locations/{locationID}", equipmentLocationHandler.GetByID)
+		router.Patch("/equipment-locations/{locationID}", equipmentLocationHandler.Update)
 		router.Get(
 			"/equipment-locations/{locationID}/assignment",
 			extinguisherAssignmentHandler.GetActiveByEquipmentLocation,

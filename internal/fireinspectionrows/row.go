@@ -224,7 +224,7 @@ func (r *Repository) CreateForJob(
 		_ = tx.Rollback(ctx)
 	}()
 
-	var siteID uuid.UUID
+	var siteID *uuid.UUID
 	var jobStatus string
 	var inspectionQuarter *string
 
@@ -236,12 +236,8 @@ func (r *Repository) CreateForJob(
 		JOIN customers c
 			ON c.id = j.customer_id
 			AND c.archived_at IS NULL
-		JOIN sites s
-			ON s.id = j.site_id
-			AND s.customer_id = j.customer_id
-			AND s.archived_at IS NULL
-		WHERE j.id = $1
-			AND j.archived_at IS NULL
+                  WHERE j.id = $1
+                          AND j.archived_at IS NULL
 		FOR UPDATE OF j
 		`,
 		jobID,
@@ -257,6 +253,9 @@ func (r *Repository) CreateForJob(
 		return Row{}, ErrJobNotEditable
 	}
 
+	if siteID == nil {
+		return Row{}, errors.New("telephely nélküli munkalaphoz nem rögzíthető készüléksor")
+	}
 	locationCode := strings.TrimSpace(input.LocationCode)
 	locationName := strings.TrimSpace(input.LocationName)
 	extinguisherType := strings.TrimSpace(input.ExtinguisherType)
@@ -278,7 +277,7 @@ func (r *Repository) CreateForJob(
 				AND archived_at IS NULL
 				AND location_code = $2
 			`,
-			siteID,
+			*siteID,
 			locationCode,
 		).Scan(&existingLocationID)
 		if err == nil {
@@ -300,7 +299,7 @@ func (r *Repository) CreateForJob(
 			AND archived_at IS NULL
 			AND normalized_description = $2
 		`,
-		siteID,
+		*siteID,
 		normalizeLocationDescription(locationName),
 	).Scan(&existingLocationID)
 	if err == nil {
@@ -341,7 +340,7 @@ func (r *Repository) CreateForJob(
 		WHERE site_id = $1
 			AND archived_at IS NULL
 		`,
-		siteID,
+		*siteID,
 	).Scan(&nextSortOrder); err != nil {
 		return Row{}, err
 	}
@@ -362,7 +361,7 @@ func (r *Repository) CreateForJob(
 		VALUES ($1, NULLIF($2, ''), $3, $4, $5, $6)
 		RETURNING id
 		`,
-		siteID,
+		*siteID,
 		locationCode,
 		locationName,
 		normalizeLocationDescription(locationName),
@@ -803,6 +802,74 @@ func (r *Repository) Inspect(
 	return r.GetByID(ctx, jobID, rowID)
 }
 
+func (r *Repository) Delete(
+	ctx context.Context,
+	jobID uuid.UUID,
+	rowID uuid.UUID,
+) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	var jobStatus string
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT status
+		FROM fire_inspection_jobs
+		WHERE id = $1
+		  AND archived_at IS NULL
+		FOR UPDATE
+		`,
+		jobID,
+	).Scan(&jobStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrJobNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if jobStatus == "COMPLETED" || jobStatus == "CANCELLED" {
+		return ErrJobNotEditable
+	}
+
+	commandTag, err := tx.Exec(
+		ctx,
+		`
+		DELETE FROM fire_inspection_rows
+		WHERE id = $1
+		  AND fire_inspection_job_id = $2
+		`,
+		rowID,
+		jobID,
+	)
+	if err != nil {
+		return err
+	}
+
+	if commandTag.RowsAffected() == 0 {
+		var exists bool
+		err = tx.QueryRow(
+			ctx,
+			`SELECT EXISTS(SELECT 1 FROM fire_inspection_rows WHERE id = $1)`,
+			rowID,
+		).Scan(&exists)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return ErrRowDoesNotBelongToJob
+		}
+		return ErrRowNotFound
+	}
+
+	return tx.Commit(ctx)
+}
+
 func (r *Repository) Update(
 	ctx context.Context,
 	jobID uuid.UUID,
@@ -882,24 +949,20 @@ func (r *Repository) Update(
 				ELSE fire_extinguisher_id
 			END,
 			okf_number = CASE
-				WHEN $4 THEN NULL
-				WHEN $5 THEN $6
-				ELSE okf_number
+			        WHEN $5 THEN $6
+			        ELSE okf_number
 			END,
 			extinguisher_type_code = CASE
-				WHEN $4 THEN NULL
-				WHEN $7 THEN $8
-				ELSE extinguisher_type_code
+			        WHEN $7 THEN $8
+			        ELSE extinguisher_type_code
 			END,
 			extinguisher_type_display = CASE
-				WHEN $4 THEN NULL
-				WHEN $9 THEN $10
-				ELSE extinguisher_type_display
+			        WHEN $9 THEN $10
+			        ELSE extinguisher_type_display
 			END,
 			capacity_kg = CASE
-				WHEN $4 THEN NULL
-				WHEN $11 THEN $12
-				ELSE capacity_kg
+			        WHEN $11 THEN $12
+			        ELSE capacity_kg
 			END,
 			notes = CASE
 				WHEN $13 THEN $14
@@ -1083,7 +1146,7 @@ func listByJobID(
 
 func isUpdatableRowResult(value string) bool {
 	switch value {
-	case RowResultChecked, RowResultRepair, RowResultMissing:
+	case RowResultChecked, RowResultRepair, RowResultNew, RowResultMissing:
 		return true
 	default:
 		return false
